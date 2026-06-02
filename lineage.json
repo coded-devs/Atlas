@@ -1,0 +1,110 @@
+{
+  "_comment": "Mock downstream dependency graph for Atlas. Maps Fivetran-landed warehouse columns to the dbt models, dashboards, scheduled reports, and ML features that depend on them. Atlas treats this as authoritative read-only lineage for the demo. In production, this would be populated from Looker/Tableau/Hex/dbt APIs.",
+
+  "tables": {
+    "stripe.customers": {
+      "criticality": "tier_1",
+      "team_owner": "data-platform",
+      "columns": {
+        "id": {
+          "description": "Unique customer ID, primary key",
+          "is_pii": false,
+          "downstream": [
+            { "type": "dbt_model", "name": "mart_customers", "owner": "analytics-team", "criticality": "tier_1" },
+            { "type": "dbt_model", "name": "fct_revenue", "owner": "finance-analytics", "criticality": "tier_1" },
+            { "type": "dashboard", "tool": "looker", "name": "Executive Revenue Dashboard", "owner": "cfo-office", "criticality": "tier_1" }
+          ]
+        },
+        "email": {
+          "description": "Customer email address",
+          "is_pii": true,
+          "downstream": [
+            { "type": "dbt_model", "name": "mart_customers", "owner": "analytics-team", "criticality": "tier_1" },
+            { "type": "scheduled_report", "name": "Weekly Marketing Send List", "owner": "marketing-ops", "criticality": "tier_2" }
+          ]
+        },
+        "customer_segment": {
+          "description": "Marketing-assigned segment label (enterprise, smb, freemium)",
+          "is_pii": false,
+          "downstream": [
+            { "type": "dbt_model", "name": "mart_customer_segments", "owner": "analytics-team", "criticality": "tier_2" },
+            { "type": "dashboard", "tool": "looker", "name": "Revenue by Segment", "owner": "sales-leadership", "criticality": "tier_1" },
+            { "type": "dashboard", "tool": "looker", "name": "Segment Retention Cohorts", "owner": "growth-team", "criticality": "tier_2" },
+            { "type": "ml_feature", "name": "churn_predictor_v3", "owner": "ml-platform", "criticality": "tier_2" },
+            { "type": "scheduled_report", "name": "Monthly Board Deck — Segment Revenue", "owner": "cfo-office", "criticality": "tier_1" }
+          ]
+        },
+        "created_at": {
+          "description": "When the customer signed up",
+          "is_pii": false,
+          "downstream": [
+            { "type": "dbt_model", "name": "mart_customers", "owner": "analytics-team", "criticality": "tier_1" },
+            { "type": "dashboard", "tool": "looker", "name": "Cohort Analysis", "owner": "growth-team", "criticality": "tier_2" }
+          ]
+        }
+      }
+    },
+
+    "stripe.subscriptions": {
+      "criticality": "tier_1",
+      "team_owner": "data-platform",
+      "columns": {
+        "id": { "description": "Subscription ID", "is_pii": false, "downstream": [
+          { "type": "dbt_model", "name": "fct_subscriptions", "owner": "finance-analytics", "criticality": "tier_1" }
+        ]},
+        "customer_id": { "description": "FK to stripe.customers", "is_pii": false, "downstream": [
+          { "type": "dbt_model", "name": "fct_subscriptions", "owner": "finance-analytics", "criticality": "tier_1" },
+          { "type": "dashboard", "tool": "looker", "name": "MRR Dashboard", "owner": "cfo-office", "criticality": "tier_1" }
+        ]},
+        "status": { "description": "active, canceled, past_due, trialing", "is_pii": false, "downstream": [
+          { "type": "dbt_model", "name": "fct_subscriptions", "owner": "finance-analytics", "criticality": "tier_1" },
+          { "type": "dashboard", "tool": "looker", "name": "Churn Dashboard", "owner": "growth-team", "criticality": "tier_1" }
+        ]},
+        "plan_name": { "description": "Subscription tier name", "is_pii": false, "downstream": [
+          { "type": "dashboard", "tool": "looker", "name": "Plan Distribution", "owner": "product-team", "criticality": "tier_2" }
+        ]}
+      }
+    },
+
+    "hubspot.deals": {
+      "criticality": "tier_2",
+      "team_owner": "data-platform",
+      "columns": {
+        "deal_id": { "description": "HubSpot deal ID", "is_pii": false, "downstream": [
+          { "type": "dbt_model", "name": "mart_sales_pipeline", "owner": "sales-ops", "criticality": "tier_2" }
+        ]},
+        "amount": { "description": "Deal value in USD", "is_pii": false, "downstream": [
+          { "type": "dbt_model", "name": "mart_sales_pipeline", "owner": "sales-ops", "criticality": "tier_2" },
+          { "type": "dashboard", "tool": "looker", "name": "Sales Pipeline Health", "owner": "sales-leadership", "criticality": "tier_1" }
+        ]},
+        "deal_stage": { "description": "Stage in sales funnel", "is_pii": false, "downstream": [
+          { "type": "dashboard", "tool": "looker", "name": "Sales Pipeline Health", "owner": "sales-leadership", "criticality": "tier_1" }
+        ]},
+        "lead_source_legacy": {
+          "description": "DEPRECATED — old lead-source field, replaced by hubspot.contacts.acquisition_channel",
+          "is_pii": false,
+          "downstream": []
+        }
+      }
+    }
+  },
+
+  "owners": {
+    "data-platform": { "slack": "#data-platform", "email": "data-platform@example.com", "lead": "Priya Patel" },
+    "analytics-team": { "slack": "#analytics", "email": "analytics@example.com", "lead": "Marcus Chen" },
+    "finance-analytics": { "slack": "#finance-data", "email": "finance-analytics@example.com", "lead": "Sarah Okonkwo" },
+    "sales-leadership": { "slack": "#sales-leads", "email": "sales-leadership@example.com", "lead": "James Reilly" },
+    "sales-ops": { "slack": "#sales-ops", "email": "sales-ops@example.com", "lead": "Diana Acheampong" },
+    "marketing-ops": { "slack": "#marketing-ops", "email": "marketing-ops@example.com", "lead": "Tomás Vega" },
+    "growth-team": { "slack": "#growth", "email": "growth@example.com", "lead": "Aiko Tanaka" },
+    "ml-platform": { "slack": "#ml-platform", "email": "ml-platform@example.com", "lead": "Daniel Adeyemi" },
+    "product-team": { "slack": "#product", "email": "product@example.com", "lead": "Lena Whitfield" },
+    "cfo-office": { "slack": "#cfo-direct", "email": "cfo-office@example.com", "lead": "Robert Kim" }
+  },
+
+  "criticality_levels": {
+    "tier_1": { "description": "Business-critical. Used by execs or revenue-impacting systems. Requires 2-week deprecation notice minimum.", "deprecation_notice_days": 14 },
+    "tier_2": { "description": "Important but recoverable. Team-level analytics. Requires 1-week notice.", "deprecation_notice_days": 7 },
+    "tier_3": { "description": "Internal exploration. Minimal notice required.", "deprecation_notice_days": 2 }
+  }
+}
