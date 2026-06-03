@@ -12,10 +12,37 @@ For the hackathon demo, they read from a curated JSON file.
 import json
 from pathlib import Path
 
-# Load the graph once at import time
+# The active lineage graph. Functions below always read from this module-level
+# global, so swapping it at runtime (load_graph / load_default) instantly
+# changes what every query sees — no need to touch the functions themselves.
 _LINEAGE_PATH = Path(__file__).parent / "lineage.json"
-with open(_LINEAGE_PATH) as f:
-    _GRAPH = json.load(f)
+_GRAPH = {}
+
+
+def load_graph(data: dict) -> dict:
+    """
+    Replace the active lineage graph at runtime.
+
+    Args:
+        data: a lineage dict in the same shape as lineage.json
+              (top-level "tables", "owners", "criticality_levels" keys).
+
+    Returns:
+        The graph that is now active.
+    """
+    global _GRAPH
+    _GRAPH = data
+    return _GRAPH
+
+
+def load_default() -> dict:
+    """Load the bundled lineage.json and make it the active graph."""
+    with open(_LINEAGE_PATH) as f:
+        return load_graph(json.load(f))
+
+
+# Load the default graph once at import time so the demo works out of the box.
+load_default()
 
 
 def find_downstream(table: str, column: str) -> dict:

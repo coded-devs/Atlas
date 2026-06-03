@@ -22,6 +22,7 @@ from google.genai import types
 from dotenv import load_dotenv
 
 from lineage import summarize_impact
+from gemini_client import smart_generate
 from fivetran_tools import (
     list_connections,
     get_connection_details,
@@ -44,7 +45,6 @@ if not API_KEY:
     sys.exit(1)
 
 client = genai.Client(api_key=API_KEY)
-MODEL = "gemini-2.5-flash"
 
 REPORTS_DIR = Path(__file__).parent / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
@@ -245,11 +245,7 @@ def _run_agent_loop(contents: list, tool_decls: list, system_prompt: str, phase_
 
     for step in range(1, max_steps + 1):
         try:
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=contents,
-                config=config,
-            )
+            response = smart_generate(client, contents, config)
         except Exception as e:
             print(f"\n  [!] Gemini API error: {e}")
             return f"ERROR: {e}"
