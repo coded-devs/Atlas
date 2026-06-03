@@ -19,7 +19,7 @@ from google import genai
 from google.genai import types
 from dotenv import load_dotenv
 
-from lineage import summarize_impact, load_default, load_graph
+from lineage import summarize_impact, load_default, load_graph, calculate_semantic_risk
 from gemini_client import smart_generate
 from fivetran_tools import (
     list_connections,
@@ -577,6 +577,8 @@ if "tool_log" not in st.session_state:
     st.session_state.tool_log = []
 if "user_request" not in st.session_state:
     st.session_state.user_request = ""
+if "severity" not in st.session_state:
+    st.session_state.severity = None
 
 
 # ---------------------------------------------------------------------------
@@ -794,6 +796,20 @@ if analyze_clicked and request.strip():
     st.session_state.analysis_contents = contents
     st.session_state.tool_log = tool_log
 
+    # --- Deterministic Semantic Ranker ---
+    # Scan the tool log for a summarize_impact call and run the ranker.
+    # This is pure Python — no LLM involved. The result is stored so
+    # it can be (a) displayed as a badge, (b) locked into Gemini's context.
+    st.session_state.severity = None
+    for entry in tool_log:
+        if entry["tool"] == "summarize_impact":
+            args = entry["args"]
+            table = args.get("table", "")
+            column = args.get("column", "")
+            if table and column:
+                st.session_state.severity = calculate_semantic_risk(table, column)
+            break  # only need the first one
+
 
 # ---------------------------------------------------------------------------
 # Display analysis report
@@ -801,6 +817,41 @@ if analyze_clicked and request.strip():
 
 if st.session_state.analysis_report and not st.session_state.execution_done:
     st.markdown('<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 1.5rem 0;">', unsafe_allow_html=True)
+
+    # --- Severity Badge (deterministic, no LLM) ---
+    sev = st.session_state.severity
+    if sev:
+        _sev_colors = {
+            "CRITICAL": ("rgba(239,68,68,0.12)", "rgba(239,68,68,0.35)", "#fca5a5"),
+            "HIGH":     ("rgba(249,115,22,0.12)", "rgba(249,115,22,0.35)", "#fdba74"),
+            "WARNING":  ("rgba(234,179,8,0.12)",  "rgba(234,179,8,0.35)",  "#fde047"),
+            "INFO":     ("rgba(59,130,246,0.12)",  "rgba(59,130,246,0.35)",  "#93c5fd"),
+        }
+        bg, border, text = _sev_colors.get(sev["severity"], _sev_colors["INFO"])
+        st.markdown(f"""
+        <div style="
+            background: {bg};
+            border: 1px solid {border};
+            border-radius: 14px;
+            padding: 1.2rem 1.8rem;
+            margin-bottom: 1.2rem;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        ">
+            <span style="font-size: 2.2rem; line-height: 1;">{sev['badge'].split()[0]}</span>
+            <div>
+                <div style="font-size: 1.3rem; font-weight: 700; color: {text}; letter-spacing: 0.04em;">
+                    {sev['badge']} &mdash; {sev['label']}
+                </div>
+                <div style="font-size: 0.88rem; color: #94a3b8; margin-top: 0.2rem;">
+                    {sev['rationale']}
+                    {'&nbsp;&nbsp;|&nbsp;&nbsp;<strong style="color:' + text + ';">Minimum notice: ' + str(sev['notice_days']) + ' days</strong>' if sev['notice_days'] > 0 else ''}
+                </div>
+                <div style="font-size: 0.75rem; color: #475569; margin-top: 0.4rem;">⚙️ Calculated by deterministic Semantic Ranker &mdash; not AI-generated</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
     # Report card
     report_title = "📊 Impact Analysis Report" if st.session_state.tool_log else "💬 Atlas Response"

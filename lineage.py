@@ -137,6 +137,80 @@ def summarize_impact(table: str, column: str) -> dict:
     }
 
 
+def calculate_semantic_risk(table: str, column: str) -> dict:
+    """
+    Deterministic Semantic Ranker — inspired by LineageGuard.
+
+    Calculates a strict, code-determined severity level for a proposed
+    schema change. No LLM is involved in this calculation. The result is
+    passed to Gemini so it cannot hallucinate or soften the severity.
+
+    Severity tiers:
+      🔴 CRITICAL  — any Tier 1 asset downstream (exec dashboards, revenue models)
+      🟠 HIGH      — any Tier 2 asset downstream (team analytics, important models)
+      🟡 WARNING   — only Tier 3 assets downstream (internal/exploratory)
+      🔵 INFO      — no downstream dependencies at all
+
+    Returns a dict with: severity, badge, notice_days, rationale
+    """
+    impact = summarize_impact(table, column)
+
+    if not impact.get("found", True):
+        return {
+            "severity": "INFO",
+            "badge": "🔵 INFO",
+            "label": "Safe to drop",
+            "notice_days": 0,
+            "rationale": "Column not found in lineage graph — no downstream dependencies.",
+        }
+
+    count = impact.get("downstream_count", 0)
+    if count == 0:
+        return {
+            "severity": "INFO",
+            "badge": "🔵 INFO",
+            "label": "Safe to drop",
+            "notice_days": 0,
+            "rationale": "No downstream dependencies found. Column can be removed immediately.",
+        }
+
+    tier = impact.get("highest_criticality", "tier_3")
+
+    if tier == "tier_1":
+        return {
+            "severity": "CRITICAL",
+            "badge": "🔴 CRITICAL",
+            "label": "Business-critical impact",
+            "notice_days": 14,
+            "rationale": (
+                f"{count} downstream asset(s) affected. At least one is Tier 1 "
+                "(exec-facing or revenue-critical). Minimum 2-week deprecation notice required."
+            ),
+        }
+    elif tier == "tier_2":
+        return {
+            "severity": "HIGH",
+            "badge": "🟠 HIGH",
+            "label": "Significant impact",
+            "notice_days": 7,
+            "rationale": (
+                f"{count} downstream asset(s) affected. Highest tier is Tier 2 "
+                "(team-level analytics). Minimum 1-week deprecation notice required."
+            ),
+        }
+    else:
+        return {
+            "severity": "WARNING",
+            "badge": "🟡 WARNING",
+            "label": "Low-risk impact",
+            "notice_days": 2,
+            "rationale": (
+                f"{count} downstream asset(s) affected. All are Tier 3 "
+                "(internal/exploratory). Minimal notice required — 2 days recommended."
+            ),
+        }
+
+
 # Quick self-test — run `python lineage.py` to verify the file works
 if __name__ == "__main__":
     print("=== Testing lineage.py ===\n")
