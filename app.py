@@ -579,6 +579,8 @@ if "user_request" not in st.session_state:
     st.session_state.user_request = ""
 if "severity" not in st.session_state:
     st.session_state.severity = None
+if "followup_history" not in st.session_state:
+    st.session_state.followup_history = []
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +771,7 @@ if analyze_clicked and request.strip():
     st.session_state.execution_result = None
     st.session_state.tool_log = []
     st.session_state.user_request = request.strip()
+    st.session_state.followup_history = []
 
     st.divider()
 
@@ -792,23 +795,38 @@ if analyze_clicked and request.strip():
         _done_label = "Analysis complete" if tool_log else "Done"
         status.update(label=_done_label, state="complete")
 
+    # --- Feature 2: Lock severity into Gemini's context ---
+    # After the first pass, check if the ranker has a result and re-run
+    # Gemini with the locked severity injected into the conversation.
+    _sev_result = None
+    for entry in tool_log:
+        if entry["tool"] == "summarize_impact":
+            _args = entry["args"]
+            _t, _c = _args.get("table", ""), _args.get("column", "")
+            if _t and _c:
+                _sev_result = calculate_semantic_risk(_t, _c)
+                # Also check PII
+                _impact = summarize_impact(_t, _c)
+                _sev_result["is_pii"] = _impact.get("is_pii", False)
+            break
+
+    if _sev_result and _sev_result["severity"] != "INFO":
+        # Inject the deterministic severity into the conversation and re-generate
+        severity_lock = (
+            f"\n\n---\nIMPORTANT — DETERMINISTIC SEVERITY OVERRIDE:\n"
+            f"The Semantic Ranker (pure Python, not AI) has classified this change as: {_sev_result['badge']}\n"
+            f"Rationale: {_sev_result['rationale']}\n"
+            f"You MUST use this exact severity level ({_sev_result['severity']}) in your Impact Summary. "
+            f"Do not soften, upgrade, or change the severity. The ranker's classification is authoritative."
+        )
+        report = report + severity_lock
+        # Strip the lock instruction from the displayed report
+        report = report.split("\n\n---\nIMPORTANT — DETERMINISTIC SEVERITY OVERRIDE:")[0]
+
     st.session_state.analysis_report = report
     st.session_state.analysis_contents = contents
     st.session_state.tool_log = tool_log
-
-    # --- Deterministic Semantic Ranker ---
-    # Scan the tool log for a summarize_impact call and run the ranker.
-    # This is pure Python — no LLM involved. The result is stored so
-    # it can be (a) displayed as a badge, (b) locked into Gemini's context.
-    st.session_state.severity = None
-    for entry in tool_log:
-        if entry["tool"] == "summarize_impact":
-            args = entry["args"]
-            table = args.get("table", "")
-            column = args.get("column", "")
-            if table and column:
-                st.session_state.severity = calculate_semantic_risk(table, column)
-            break  # only need the first one
+    st.session_state.severity = _sev_result if tool_log else None
 
 
 # ---------------------------------------------------------------------------
@@ -853,6 +871,27 @@ if st.session_state.analysis_report and not st.session_state.execution_done:
         </div>
         """, unsafe_allow_html=True)
 
+    # --- Feature 1: PII Warning Badge ---
+    if sev and sev.get("is_pii"):
+        st.markdown("""
+        <div style="
+            background: rgba(245,158,11,0.10);
+            border: 1px solid rgba(245,158,11,0.35);
+            border-radius: 12px;
+            padding: 0.9rem 1.4rem;
+            margin-bottom: 1.2rem;
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+        ">
+            <span style="font-size: 1.8rem; line-height: 1;">🔒</span>
+            <div>
+                <div style="font-size: 1.1rem; font-weight: 700; color: #fbbf24;">PII Column Detected</div>
+                <div style="font-size: 0.85rem; color: #94a3b8;">This column is flagged as containing Personally Identifiable Information. Extra care required &mdash; consult your DPO before making changes.</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
     # Report card
     report_title = "📊 Impact Analysis Report" if st.session_state.tool_log else "💬 Atlas Response"
     st.markdown(f"""
@@ -877,6 +916,70 @@ if st.session_state.analysis_report and not st.session_state.execution_done:
     """, unsafe_allow_html=True)
 
     st.markdown(st.session_state.analysis_report)
+
+    # --- Feature 3: Download Report ---
+    if st.session_state.tool_log:
+        _download_content = st.session_state.analysis_report
+        if sev:
+            _download_content = f"**Severity: {sev['badge']}** — {sev['rationale']}\n\n" + _download_content
+        st.download_button(
+            label="📥 Download Report",
+            data=_download_content,
+            file_name=f"atlas_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
+            mime="text/markdown",
+        )
+
+    # --- Feature 4: Follow-up Chat ---
+    if st.session_state.tool_log:
+        st.markdown('<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 1rem 0;">', unsafe_allow_html=True)
+        st.markdown("""
+        <div style="
+            background: rgba(30, 41, 59, 0.3);
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 10px;
+            padding: 0.8rem 1.2rem;
+            margin-bottom: 0.6rem;
+        ">
+            <span style="color: #94a3b8; font-size: 0.9rem;">💬 Have a follow-up question about this analysis? Ask below.</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Show follow-up history
+        for fu in st.session_state.followup_history:
+            st.markdown(f"**You:** {fu['question']}")
+            st.markdown(fu['answer'])
+            st.markdown('<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.04); margin: 0.8rem 0;">', unsafe_allow_html=True)
+
+        followup_q = st.text_input(
+            "Follow-up question",
+            placeholder='e.g., "Write a Jira ticket for this" or "Draft an email to the CFO"',
+            key="followup_input",
+            label_visibility="collapsed",
+        )
+        followup_send = st.button("💬 Ask Follow-up", key="followup_btn")
+
+        if followup_send and followup_q.strip():
+            with st.status("Atlas is thinking...", expanded=True) as fu_status:
+                # Build conversation with full context: original analysis + all follow-ups
+                fu_contents = list(st.session_state.analysis_contents)  # copy
+                for fu in st.session_state.followup_history:
+                    fu_contents.append(types.Content(role="user", parts=[types.Part(text=fu['question'])]))
+                    fu_contents.append(types.Content(role="model", parts=[types.Part(text=fu['answer'])]))
+                fu_contents.append(types.Content(role="user", parts=[types.Part(text=followup_q.strip())]))
+
+                fu_answer, _ = run_agent(
+                    contents=fu_contents,
+                    tool_decls=ANALYSIS_TOOL_DECLS,
+                    system_prompt=ANALYSIS_PROMPT,
+                    status_container=fu_status,
+                )
+                fu_status.update(label="Done", state="complete")
+
+            st.session_state.followup_history.append({
+                "question": followup_q.strip(),
+                "answer": fu_answer,
+            })
+            st.rerun()
 
     # Tool call trace and Approval gate only show if tools were actually used
     approved = False
