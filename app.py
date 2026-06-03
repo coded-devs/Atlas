@@ -12,8 +12,10 @@ import os
 import json
 import csv
 import io
+import requests as http_requests
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 from google import genai
 from google.genai import types
@@ -633,6 +635,15 @@ with st.sidebar:
     configure_data_source()
 
     st.divider()
+    st.header("Integrations")
+    slack_webhook = st.text_input(
+        "Slack Webhook URL",
+        type="password",
+        placeholder="https://hooks.slack.com/services/...",
+        help="Paste an Incoming Webhook URL to send notifications directly to Slack. Create one at https://api.slack.com/apps",
+    )
+
+    st.divider()
     st.markdown("""
     <div style="padding: 0.5rem 0;">
         <h4 style="color: #cbd5e1; margin-bottom: 0.8rem;">⚡ How it works</h4>
@@ -928,6 +939,145 @@ if st.session_state.analysis_report and not st.session_state.execution_done:
             file_name=f"atlas_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md",
             mime="text/markdown",
         )
+
+    # --- Feature 5: Stakeholder Notification Cards ---
+    if st.session_state.tool_log and sev and sev.get("severity") != "INFO":
+        # Pull the affected teams from the lineage data
+        _notif_table = None
+        _notif_column = None
+        for entry in st.session_state.tool_log:
+            if entry["tool"] == "summarize_impact":
+                _notif_table = entry["args"].get("table", "")
+                _notif_column = entry["args"].get("column", "")
+                break
+
+        if _notif_table and _notif_column:
+            _impact_data = summarize_impact(_notif_table, _notif_column)
+            _teams_seen = set()
+            _notifications = []
+
+            for asset in _impact_data.get("downstream_assets", []):
+                team = asset.get("owner", "")
+                if team and team not in _teams_seen:
+                    _teams_seen.add(team)
+                    contact = asset.get("owner_contact", {})
+                    lead = contact.get("lead", "Team Lead")
+                    email = contact.get("email", "")
+                    slack_channel = contact.get("slack", "")
+                    asset_name = asset.get("name", "")
+                    criticality = asset.get("criticality", "tier_3")
+
+                    # Build the notification message
+                    msg = (
+                        f"⚠️ *Schema Change Notice — {_notif_table}.{_notif_column}*\n\n"
+                        f"Hi {lead},\n\n"
+                        f"The data platform team is planning to deprecate the `{_notif_column}` column "
+                        f"from `{_notif_table}`. Our analysis shows this impacts your asset "
+                        f"*{asset_name}* ({criticality.replace('_', ' ').title()}).\n\n"
+                        f"Severity: {sev['badge']}\n"
+                        f"Required notice: {sev['notice_days']} days\n\n"
+                        f"Please review and confirm whether your team has any dependencies "
+                        f"that need migration before this change is applied.\n\n"
+                        f"— Atlas (Data Change Intelligence Agent)"
+                    )
+                    _notifications.append({
+                        "team": team,
+                        "lead": lead,
+                        "email": email,
+                        "slack_channel": slack_channel,
+                        "message": msg,
+                        "asset_name": asset_name,
+                        "criticality": criticality,
+                    })
+
+            if _notifications:
+                st.markdown('<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 1.5rem 0;">', unsafe_allow_html=True)
+                st.markdown("""
+                <div style="
+                    background: rgba(30, 41, 59, 0.5);
+                    border: 1px solid rgba(255, 255, 255, 0.06);
+                    border-radius: 12px;
+                    padding: 1.2rem 1.5rem;
+                    margin-bottom: 1rem;
+                    backdrop-filter: blur(8px);
+                ">
+                    <h3 style="color: #a78bfa; margin: 0; font-size: 1.2rem;">📨 Stakeholder Notifications</h3>
+                    <p style="color: #64748b; font-size: 0.8rem; margin: 0.3rem 0 0 0;">Send impact alerts to affected teams via Slack or Email</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                for idx, notif in enumerate(_notifications):
+                    tier_colors = {
+                        "tier_1": "#fca5a5",
+                        "tier_2": "#fdba74",
+                        "tier_3": "#fde047",
+                    }
+                    tier_color = tier_colors.get(notif["criticality"], "#94a3b8")
+
+                    st.markdown(f"""
+                    <div style="
+                        background: rgba(30, 41, 59, 0.4);
+                        border: 1px solid rgba(255,255,255,0.08);
+                        border-left: 3px solid {tier_color};
+                        border-radius: 0 10px 10px 0;
+                        padding: 1rem 1.3rem;
+                        margin-bottom: 0.8rem;
+                    ">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem;">
+                            <div>
+                                <strong style="color: #e2e8f0; font-size: 1rem;">{notif['team']}</strong>
+                                <span style="color: #64748b; font-size: 0.85rem;"> · {notif['lead']}</span>
+                            </div>
+                            <span style="color: {tier_color}; font-size: 0.8rem; font-weight: 600;">{notif['criticality'].replace('_', ' ').upper()}</span>
+                        </div>
+                        <div style="color: #94a3b8; font-size: 0.82rem; margin-bottom: 0.3rem;">
+                            Asset: <code style="color: #e2e8f0;">{notif['asset_name']}</code>
+                            {' · Slack: <code style="color: #e2e8f0;">' + notif['slack_channel'] + '</code>' if notif['slack_channel'] else ''}
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    with st.expander(f"📝 Preview message for {notif['team']}", expanded=False):
+                        st.code(notif["message"], language=None)
+
+                    col_slack, col_email, col_space = st.columns([1, 1, 2])
+
+                    with col_slack:
+                        if st.button(f"💬 Send to Slack", key=f"slack_{idx}", use_container_width=True):
+                            if slack_webhook:
+                                try:
+                                    resp = http_requests.post(
+                                        slack_webhook,
+                                        json={"text": notif["message"]},
+                                        timeout=10,
+                                    )
+                                    if resp.status_code == 200:
+                                        st.success(f"✅ Sent to Slack!")
+                                    else:
+                                        st.error(f"Slack error: {resp.status_code} — {resp.text}")
+                                except Exception as e:
+                                    st.error(f"Failed: {e}")
+                            else:
+                                st.warning("⚙️ Add your Slack Webhook URL in the sidebar → Integrations")
+
+                    with col_email:
+                        if notif["email"]:
+                            _subject = quote(f"Schema Change Notice: {_notif_table}.{_notif_column}")
+                            _body = quote(notif["message"])
+                            _mailto = f"mailto:{notif['email']}?subject={_subject}&body={_body}"
+                            st.markdown(
+                                f'<a href="{_mailto}" target="_blank" style="'
+                                f'display: inline-block; width: 100%; text-align: center;'
+                                f'padding: 0.5rem 1rem; border-radius: 8px;'
+                                f'background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);'
+                                f'color: #e2e8f0; text-decoration: none; font-size: 0.9rem;'
+                                f'transition: all 0.3s ease;'
+                                f'">📧 Send Email</a>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.caption("No email on file")
+
 
     # --- Feature 4: Follow-up Chat ---
     if st.session_state.tool_log:
