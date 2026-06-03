@@ -150,36 +150,50 @@ ALL_TOOL_FUNCTIONS = {
 # ---------------------------------------------------------------------------
 
 ANALYSIS_PROMPT = """
-You are Atlas, a data change intelligence agent.
+You are Atlas, a data change intelligence agent built by the coded-devs team.
+You help data engineers and data platform teams safely manage schema changes by analyzing downstream impact across Fivetran pipelines.
 
-Analyze the proposed schema change. Follow these steps:
-1. Call list_connections to find the relevant connector.
-2. Call get_connection_schema_config to confirm the column exists.
-   -> IF the column or table does not exist in Fivetran, STOP and tell the user it cannot be found. Do not generate the rest of the report.
-3. Call get_connection_details to check connector health.
-4. Call summarize_impact to discover downstream dependencies.
-   -> IF the column or table has no lineage data, state that there are zero known downstream dependencies.
+## Behaviour Rules
 
-Then produce a report with these sections (only if the column exists):
+### Rule 1 — Conversational mode (default)
+If the user's message is a general question, greeting, or anything that does NOT clearly specify a table and column to change, respond conversationally WITHOUT calling any tools.
+- Answer questions about what you can do, how you work, what Fivetran is, etc.
+- If the user seems to want a change but hasn't given you a table and column, ask a follow-up question to get the specifics.
+- Examples of conversational messages: "what can you do?", "how does this work?", "what is Fivetran?", "tell me about data lineage", "hi", "what tables do you support?"
+
+### Rule 2 — Analysis mode (only when you have a clear target)
+If the user clearly specifies a table + column they want to drop, deprecate, remove, or evaluate, THEN call tools in this exact order:
+1. `list_connections` — find the relevant connector.
+2. `get_connection_schema_config` — confirm the column exists in Fivetran.
+   → IF NOT FOUND: Stop. Tell the user politely the column/table was not found.
+3. `get_connection_details` — check connector health.
+4. `summarize_impact` — get downstream dependencies.
+
+Then write a structured report with these sections:
+
 ## Connection Info
 One line: connector name, service, status, last sync.
 
 ## Column Status
-Confirm the column exists and is synced.
+Confirm the column exists and is currently synced.
 
 ## Impact Summary
-One paragraph: what breaks, how many assets, highest criticality.
+One paragraph: what breaks, how many assets are affected, what is the highest criticality tier.
 
 ## Affected Assets
-Bullet list: **name** (type) - owned by lead, team, tier (if none, state "No downstream dependencies").
+Bullet list: **name** (type) — owned by [lead], team: [team], tier: [tier].
+If none, write: "No downstream dependencies found — this column is safe to drop immediately."
 
 ## Recommended Deprecation Plan
-Numbered steps with day offsets (if no dependencies, recommend an immediate drop).
+Numbered steps with day offsets based on the highest tier asset found.
+If no dependencies, simply say: "Safe for immediate removal."
 
 ## Stakeholder Messages
-For each team, a Slack message (3-5 sentences). Technical for engineers, business for execs. (Skip if no dependencies).
+For each unique team affected, a 3-5 sentence Slack message.
+Technical language for engineering teams, plain business language for exec/finance teams.
+Skip this section entirely if there are no downstream dependencies.
 
-Be direct. No fluff.
+Be direct, clear, and professional. No filler text.
 """
 
 EXECUTION_PROMPT = """
@@ -687,15 +701,60 @@ col_input, col_status = st.columns([3, 1])
 
 with col_input:
     request = st.text_area(
-        "What change do you want to make?",
-        placeholder="e.g., I want to drop the customer_segment column from stripe.customers",
+        "Ask me anything about your data stack, or describe a schema change:",
+        placeholder="e.g., \"What can you do?\" or \"Drop customer_segment from stripe.customers\"",
         height=80,
     )
 
 with col_status:
     st.markdown("&nbsp;")  # spacing
     st.markdown("&nbsp;")
-    analyze_clicked = st.button("Analyze Impact", type="primary", use_container_width=True)
+    analyze_clicked = st.button("Send", type="primary", use_container_width=True)
+
+# Welcome card — only show before first interaction
+if not st.session_state.analysis_report and not st.session_state.execution_done:
+    st.markdown("""
+    <div style="
+        background: rgba(30, 41, 59, 0.4);
+        border: 1px solid rgba(255,255,255,0.06);
+        border-radius: 14px;
+        padding: 2rem 2.5rem;
+        margin-top: 1.5rem;
+        backdrop-filter: blur(8px);
+    ">
+        <p style="color: #cbd5e1; font-size: 1rem; margin: 0 0 0.3rem 0;">
+            I am <strong style="color:#a78bfa;">Atlas</strong>, your data change intelligence agent.
+            I help you safely manage schema changes by analyzing the downstream impact of modifying or removing data columns in your warehouse.
+        </p>
+        <p style="color: #94a3b8; font-size: 0.95rem; margin: 0.8rem 0 1.2rem 0;">
+            You can ask me to evaluate the impact of a proposed change, such as:
+            <em style="color:#818cf8;">"What happens if I drop <code>customer_id</code> from <code>stripe.customers</code>?"</em>
+        </p>
+        <h3 style="color: #e2e8f0; font-size: 1.1rem; margin: 0 0 0.8rem 0;">Here is how I can assist:</h3>
+        <ol style="color: #94a3b8; font-size: 0.92rem; line-height: 1.9; margin: 0; padding-left: 1.3rem;">
+            <li><strong style="color:#e2e8f0;">Dependency Mapping:</strong> I identify exactly which dashboards, reports, and data models will break if a column is removed or renamed.</li>
+            <li><strong style="color:#e2e8f0;">Stakeholder Identification:</strong> I tell you exactly who owns those assets so you know who to notify.</li>
+            <li><strong style="color:#e2e8f0;">Risk Assessment:</strong> I check the health and sync status of your Fivetran connectors to ensure you aren&apos;t making changes based on stale or broken pipelines.</li>
+            <li><strong style="color:#e2e8f0;">Communication Templates:</strong> I draft targeted Slack messages for both technical and business stakeholders to keep your team informed and minimize friction.</li>
+            <li><strong style="color:#e2e8f0;">Deprecation Planning:</strong> I provide a step-by-step timeline to help you decommission columns gracefully.</li>
+        </ol>
+        <p style="color: #64748b; font-size: 0.88rem; margin: 1.2rem 0 0 0;">
+            <strong style="color:#94a3b8;">How to get started:</strong> Just provide the table and column name you are planning to change. For example:
+        </p>
+        <div style="
+            background: rgba(99,102,241,0.08);
+            border: 1px solid rgba(99,102,241,0.15);
+            border-radius: 8px;
+            padding: 0.6rem 1rem;
+            margin-top: 0.6rem;
+            font-size: 0.9rem;
+            color: #94a3b8;
+            font-style: italic;
+        ">
+            &ldquo;Atlas, check the impact of removing <code style="color:#a78bfa;">user_email</code> from <code style="color:#818cf8;">salesforce.leads</code>.&rdquo;
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -711,7 +770,12 @@ if analyze_clicked and request.strip():
 
     st.divider()
 
-    with st.status("Atlas is analyzing your change...", expanded=True) as status:
+    # Pick a friendly status label based on whether this looks like an analysis or a chat
+    _request_lower = request.strip().lower()
+    _is_analysis = any(kw in _request_lower for kw in ["drop", "remove", "deprecate", "delete", "rename", "impact", "safe to", "what happens if"])
+    _status_label = "Atlas is analyzing your change..." if _is_analysis else "Atlas is thinking..."
+
+    with st.status(_status_label, expanded=True) as status:
         contents = [
             types.Content(role="user", parts=[types.Part(text=request.strip())])
         ]
@@ -723,7 +787,8 @@ if analyze_clicked and request.strip():
             status_container=status,
         )
 
-        status.update(label="Analysis complete", state="complete")
+        _done_label = "Analysis complete" if tool_log else "Done"
+        status.update(label=_done_label, state="complete")
 
     st.session_state.analysis_report = report
     st.session_state.analysis_contents = contents
@@ -738,7 +803,8 @@ if st.session_state.analysis_report and not st.session_state.execution_done:
     st.markdown('<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 1.5rem 0;">', unsafe_allow_html=True)
 
     # Report card
-    st.markdown("""
+    report_title = "📊 Impact Analysis Report" if st.session_state.tool_log else "💬 Atlas Response"
+    st.markdown(f"""
     <div style="
         background: rgba(30, 41, 59, 0.5);
         border: 1px solid rgba(255, 255, 255, 0.06);
@@ -754,40 +820,43 @@ if st.session_state.analysis_report and not st.session_state.execution_done:
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
             margin-bottom: 0.3rem;
-        ">📊 Impact Analysis Report</h2>
+        ">{report_title}</h2>
         <p style="color: #64748b; font-size: 0.85rem; margin: 0;">Generated by Atlas &bull; Gemini-powered reasoning</p>
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown(st.session_state.analysis_report)
 
-    # Tool call trace
-    with st.expander("🔧 View tool calls made during analysis"):
-        for i, entry in enumerate(st.session_state.tool_log, 1):
-            st.code(f"Step {i}: {entry['tool']}({json.dumps(entry['args'])})", language=None)
+    # Tool call trace and Approval gate only show if tools were actually used
+    approved = False
+    rejected = False
+    if st.session_state.tool_log:
+        with st.expander("🔧 View tool calls made during analysis"):
+            for i, entry in enumerate(st.session_state.tool_log, 1):
+                st.code(f"Step {i}: {entry['tool']}({json.dumps(entry['args'])})", language=None)
 
-    # Approval gate
-    st.markdown('<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 1.5rem 0;">', unsafe_allow_html=True)
+        # Approval gate
+        st.markdown('<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 1.5rem 0;">', unsafe_allow_html=True)
 
-    st.markdown("""
-    <div style="
-        background: rgba(99, 102, 241, 0.08);
-        border: 1px solid rgba(99, 102, 241, 0.2);
-        border-radius: 12px;
-        padding: 1.2rem 1.5rem;
-        margin-bottom: 1rem;
-    ">
-        <h3 style="color: #a78bfa; margin: 0 0 0.4rem 0; font-size: 1.2rem;">🛡️ Approval Gate</h3>
-        <p style="color: #94a3b8; margin: 0; font-size: 0.9rem;">Review the analysis above carefully. Atlas will <strong style="color:#e2e8f0;">only execute</strong> after your explicit approval.</p>
-    </div>
-    """, unsafe_allow_html=True)
+        st.markdown("""
+        <div style="
+            background: rgba(99, 102, 241, 0.08);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            border-radius: 12px;
+            padding: 1.2rem 1.5rem;
+            margin-bottom: 1rem;
+        ">
+            <h3 style="color: #a78bfa; margin: 0 0 0.4rem 0; font-size: 1.2rem;">🛡️ Approval Gate</h3>
+            <p style="color: #94a3b8; margin: 0; font-size: 0.9rem;">Review the analysis above carefully. Atlas will <strong style="color:#e2e8f0;">only execute</strong> after your explicit approval.</p>
+        </div>
+        """, unsafe_allow_html=True)
 
-    col_approve, col_reject, col_spacer = st.columns([1, 1, 3])
+        col_approve, col_reject, col_spacer = st.columns([1, 1, 3])
 
-    with col_approve:
-        approved = st.button("✅ Approve Execution", type="primary", use_container_width=True)
-    with col_reject:
-        rejected = st.button("❌ Reject", use_container_width=True)
+        with col_approve:
+            approved = st.button("✅ Approve Execution", type="primary", use_container_width=True)
+        with col_reject:
+            rejected = st.button("❌ Reject", use_container_width=True)
 
     if rejected:
         st.info("Execution cancelled. No changes were made.")
