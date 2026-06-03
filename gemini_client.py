@@ -2,64 +2,52 @@
 gemini_client.py — Shared Gemini call wrapper with model fallback.
 
 Both atlas.py (CLI) and app.py (Streamlit) route their generate_content
-calls through smart_generate(). When a model returns a retry-able error
-(429 RESOURCE_EXHAUSTED rate limit, 503 UNAVAILABLE, or 404 model-not-found
-for an ID this account doesn't have), we transparently fall back to the next
-model in MODEL_CHAIN instead of failing the whole request.
+calls through smart_generate(). When a model returns a 429 /
+RESOURCE_EXHAUSTED rate-limit error, we transparently fall back to the
+next model in MODEL_CHAIN instead of failing the whole request.
 
-Any non-retry-able error (bad request, auth, etc.) is re-raised unchanged
-so callers can handle it normally.
-
-Spreading load across the chain gives us roughly 3000+ requests per day
-across all models on the free tier.
+Any non-rate-limit error (bad request, auth, server error, etc.) is
+re-raised unchanged so callers can handle it normally.
 """
 
 # Models to try, in priority order. The first that isn't rate-limited wins.
+# Prioritizing Gemini 3 models as per hackathon requirements.
 MODEL_CHAIN = [
-    "gemini-2.5-flash",       # best quality, 20 RPD free
-    "gemini-2.0-flash",       # good quality, 20 RPD free
-    "gemini-1.5-flash",       # older but reliable, 1500 RPD free
-    "gemini-1.5-flash-8b",    # lightweight, 1500 RPD free
-    "gemini-2.0-flash-lite",  # lightweight, 1500 RPD free
+    "gemini-3.1-pro",
+    "gemini-3.5-flash",
+    "gemini-3.0-flash",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-pro",
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-3.1-flash-tts",
+    "gemini-2.5-flash-tts",
+    "gemini-2.5-pro-tts",
 ]
 
 
-def _is_rate_limit_error(err: Exception) -> bool:
+def _should_fallback(err: Exception) -> bool:
     """
-    True for transient capacity errors worth retrying on another model:
-    429 / RESOURCE_EXHAUSTED (rate limit) and 503 / UNAVAILABLE (overloaded).
+    True for 429 / RESOURCE_EXHAUSTED rate-limit errors, 503 / UNAVAILABLE
+    overload errors, and 404 / NOT_FOUND missing model errors.
 
-    The google-genai SDK surfaces these as an APIError with a numeric code
-    and a status string. We also fall back to string matching so the
+    The google-genai SDK surfaces these as an APIError with code == 429 and
+    status "RESOURCE_EXHAUSTED". We also fall back to string matching so the
     detection survives SDK changes — but we never treat an arbitrary error
-    as retry-able.
+    as a rate limit.
     """
-    if getattr(err, "code", None) in (429, 503):
+    code = getattr(err, "code", None)
+    if code in (429, 503, 404):
         return True
 
     status = getattr(err, "status", None)
-    if status and ("RESOURCE_EXHAUSTED" in str(status) or "UNAVAILABLE" in str(status)):
+    if status and any(x in str(status) for x in ["RESOURCE_EXHAUSTED", "UNAVAILABLE", "NOT_FOUND"]):
         return True
 
     message = str(err)
-    return any(s in message for s in ("429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE"))
-
-
-def _is_model_not_found_error(err: Exception) -> bool:
-    """
-    True for 404 / NOT_FOUND errors — a model ID that doesn't exist on this
-    account. We skip gracefully to the next model rather than crashing, since
-    model availability varies by account.
-    """
-    if getattr(err, "code", None) == 404:
-        return True
-
-    status = getattr(err, "status", None)
-    if status and "NOT_FOUND" in str(status):
-        return True
-
-    message = str(err)
-    return "404" in message or "NOT_FOUND" in message
+    return any(x in message for x in ["429", "RESOURCE_EXHAUSTED", "503", "UNAVAILABLE", "404", "NOT_FOUND"])
 
 
 def smart_generate(client, contents, config, on_status=None):
@@ -80,8 +68,8 @@ def smart_generate(client, contents, config, on_status=None):
         The generate_content response from the first model that works.
 
     Raises:
-        The last retry-able error if every model in the chain is exhausted,
-        or any non-retry-able error immediately (unchanged).
+        The last rate-limit error if every model in the chain is exhausted,
+        or any non-rate-limit error immediately (unchanged).
     """
     last_error = None
 
@@ -96,24 +84,24 @@ def smart_generate(client, contents, config, on_status=None):
                 config=config,
             )
         except Exception as e:
-            # Retry-able: 429/503 (capacity) or 404 (model missing on this
-            # account). Anything else is a real failure — re-raise untouched.
-            rate_limited = _is_rate_limit_error(e)
-            not_found = _is_model_not_found_error(e)
-            if not (rate_limited or not_found):
+            # Only certain errors trigger fallback. Anything else
+            # is a real failure — re-raise it untouched.
+            if not _should_fallback(e):
                 raise
 
             last_error = e
             next_model = MODEL_CHAIN[i + 1] if i + 1 < len(MODEL_CHAIN) else None
-            reason = "Rate limited on" if rate_limited else "Model not available:"
 
             if next_model:
-                msg = f"{reason} {model}, switching to {next_model}..."
+                msg = f"Rate limited on {model}, switching to {next_model}..."
+                print(msg)
+                if on_status:
+                    on_status(msg)
             else:
-                msg = f"{reason} {model}, no more models to try."
-            print(msg)
-            if on_status:
-                on_status(msg)
+                msg = f"Rate limited on {model}, no more models to try."
+                print(msg)
+                if on_status:
+                    on_status(msg)
 
     # Exhausted every model in the chain.
     if last_error is not None:

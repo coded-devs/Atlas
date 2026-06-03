@@ -1,3 +1,7 @@
-.env__pycache__/
-*.pyc
 .env
+__pycache__/
+*.pyc
+.streamlit/secrets.toml
+test_upload.csv
+test_upload.json
+average_company_lineage.json

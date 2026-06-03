@@ -175,10 +175,12 @@ Do NOT suggest executing anything yet. Follow these steps in order:
 
 1. Call list_connections to find the relevant Fivetran connector.
 2. Call get_connection_schema_config to confirm the target column exists and is currently synced.
+   -> IF the column or table does not exist in Fivetran, STOP and tell the user it cannot be found. Do not generate the rest of the report.
 3. Call get_connection_details to check the connector's health.
 4. Call summarize_impact to discover all downstream dependencies.
+   -> IF the column or table has no lineage data, state that there are zero known downstream dependencies.
 5. Before each tool call, state briefly what you are checking.
-6. After gathering all data, produce a report with these sections:
+6. After gathering all data, produce a report with these sections (only if the column exists):
 
    ## Connection Info
    One line: connector name, service type, sync status, last successful sync.
@@ -190,15 +192,15 @@ Do NOT suggest executing anything yet. Follow these steps in order:
    One paragraph: what breaks, how many assets affected, highest criticality.
 
    ## Affected Assets
-   Bullet list: **name** (type) - owned by team_lead, team, criticality tier
+   Bullet list: **name** (type) - owned by team_lead, team, criticality tier (if none, state "No downstream dependencies").
 
    ## Recommended Deprecation Plan
-   Numbered steps with day offsets based on the recommended notice period.
+   Numbered steps with day offsets based on the recommended notice period (if no dependencies, recommend immediate drop).
 
    ## Stakeholder Messages
    For each unique team, draft a Slack message (3-5 sentences).
    Technical tone for engineering teams, business tone for exec/sales.
-   Include the Slack channel as header.
+   Include the Slack channel as header. (Skip if no dependencies).
 
    ## Execution Preview
    State exactly which Fivetran API call will be made if the user approves:

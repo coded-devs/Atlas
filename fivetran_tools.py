@@ -115,6 +115,81 @@ _FIXTURE = {
                 },
             },
         },
+        "salesforce_crm_003": {
+            "id": "salesforce_crm_003",
+            "service": "salesforce",
+            "schema": "salesforce",
+            "group_id": "group_prod_42",
+            "paused": False,
+            "sync_frequency": 60,
+            "status": {
+                "setup_state": "connected",
+                "sync_state": "scheduled",
+                "update_state": "on_schedule",
+                "is_historical_sync": False,
+                "tasks": [],
+                "warnings": [],
+                "succeeded_at": (_NOW - timedelta(minutes=5)).isoformat() + "Z",
+                "failed_at": None,
+            },
+            "schemas": {
+                "salesforce": {
+                    "name_in_destination": "salesforce",
+                    "enabled": True,
+                    "tables": {
+                        "opportunities": {
+                            "name_in_destination": "opportunities",
+                            "enabled": True,
+                            "sync_mode": "SOFT_DELETE",
+                            "columns": {
+                                "id":             {"name_in_destination": "id",             "enabled": True,  "hashed": False, "is_primary_key": True},
+                                "amount":         {"name_in_destination": "amount",         "enabled": True,  "hashed": False, "is_primary_key": False},
+                                "stage_name":     {"name_in_destination": "stage_name",     "enabled": True,  "hashed": False, "is_primary_key": False},
+                                "forecast_category": {"name_in_destination": "forecast_category", "enabled": True,  "hashed": False, "is_primary_key": False},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+        "zendesk_support_004": {
+            "id": "zendesk_support_004",
+            "service": "zendesk",
+            "schema": "zendesk",
+            "group_id": "group_prod_42",
+            "paused": False,
+            "sync_frequency": 15,
+            "status": {
+                "setup_state": "connected",
+                "sync_state": "scheduled",
+                "update_state": "on_schedule",
+                "is_historical_sync": False,
+                "tasks": [],
+                "warnings": [],
+                "succeeded_at": (_NOW - timedelta(minutes=2)).isoformat() + "Z",
+                "failed_at": None,
+            },
+            "schemas": {
+                "zendesk": {
+                    "name_in_destination": "zendesk",
+                    "enabled": True,
+                    "tables": {
+                        "tickets": {
+                            "name_in_destination": "tickets",
+                            "enabled": True,
+                            "sync_mode": "SOFT_DELETE",
+                            "columns": {
+                                "id":             {"name_in_destination": "id",             "enabled": True,  "hashed": False, "is_primary_key": True},
+                                "subject":        {"name_in_destination": "subject",        "enabled": True,  "hashed": False, "is_primary_key": False},
+                                "status":         {"name_in_destination": "status",         "enabled": True,  "hashed": False, "is_primary_key": False},
+                                "priority":       {"name_in_destination": "priority",       "enabled": True,  "hashed": False, "is_primary_key": False},
+                                "custom_nps_score": {"name_in_destination": "custom_nps_score", "enabled": True,  "hashed": False, "is_primary_key": False},
+                            },
+                        },
+                    },
+                },
+            },
+        },
     },
     # Track changes Atlas makes during the session (so the demo can prove execution worked)
     "change_log": [],
