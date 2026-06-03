@@ -1,14 +1,14 @@
 """
-atlas.py — Atlas: Data Change Intelligence Agent
+atlas.py - Atlas: Data Change Intelligence Agent (Full Lifecycle)
 
-A multi-step Gemini agent that:
-  1. Reads a natural-language change request
-  2. Calls the lineage tool to discover downstream impact
-  3. Produces a structured impact report + stakeholder messages
+The complete agent loop:
+  Phase 1 (Analysis):  Discover connector -> confirm column -> check impact -> generate plan
+  Phase 2 (Approval):  Human reviews and approves/rejects
+  Phase 3 (Execution): Soft-deprecate column -> trigger verification sync -> show proof
 
 Run:
-    python atlas.py             # runs the full 3-scenario demo
-    python atlas.py --single    # runs only the headline scenario
+    python atlas.py                # full lifecycle demo (headline scenario)
+    python atlas.py --analysis     # analysis only, skip execution
 """
 
 import os
@@ -22,6 +22,15 @@ from google.genai import types
 from dotenv import load_dotenv
 
 from lineage import summarize_impact
+from fivetran_tools import (
+    list_connections,
+    get_connection_details,
+    get_connection_state,
+    get_connection_schema_config,
+    modify_connection_column_config,
+    sync_connection,
+    get_change_log,
+)
 
 # ---------------------------------------------------------------------------
 # Setup
@@ -31,260 +40,411 @@ load_dotenv()
 
 API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
-    print("ERROR: GEMINI_API_KEY missing from .env file. Aborting.")
+    print("ERROR: GEMINI_API_KEY missing from .env file.")
     sys.exit(1)
 
 client = genai.Client(api_key=API_KEY)
-MODEL_NAME = "gemini-2.5-flash"
+MODEL = "gemini-2.5-flash"
 
 REPORTS_DIR = Path(__file__).parent / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
-# Tool declaration — the manual page Gemini reads to know when to call it
+# Tool declarations - what Gemini sees
 # ---------------------------------------------------------------------------
 
-SUMMARIZE_IMPACT_DECL = {
-    "name": "summarize_impact",
-    "description": (
-        "Look up the full downstream impact of changing a specific column in a "
-        "Fivetran-landed warehouse table. Returns dbt models, dashboards, "
-        "scheduled reports, and ML features that depend on the column, along "
-        "with owner contact info (Slack, email, team lead) and the recommended "
-        "deprecation notice period based on criticality. "
-        "Call this BEFORE making any recommendation about a schema change."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "table": {
-                "type": "string",
-                "description": (
-                    "Fully-qualified table name in the warehouse, e.g. "
-                    "'stripe.customers', 'hubspot.deals', 'stripe.subscriptions'."
-                ),
-            },
-            "column": {
-                "type": "string",
-                "description": "Column name within the table, e.g. 'customer_segment'.",
-            },
-        },
-        "required": ["table", "column"],
+ANALYSIS_TOOL_DECLS = [
+    {
+        "name": "list_connections",
+        "description": (
+            "List all Fivetran connections (data pipelines) in the account. "
+            "Use this first to find the connection_id for a given data source like Stripe or HubSpot."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
     },
-}
+    {
+        "name": "get_connection_details",
+        "description": "Get sync status, schedule, and health info for a specific Fivetran connection.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "connection_id": {"type": "string", "description": "The connection ID from list_connections."},
+            },
+            "required": ["connection_id"],
+        },
+    },
+    {
+        "name": "get_connection_state",
+        "description": "Get current sync state (running, scheduled, paused) for a connection.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "connection_id": {"type": "string", "description": "The connection ID."},
+            },
+            "required": ["connection_id"],
+        },
+    },
+    {
+        "name": "get_connection_schema_config",
+        "description": (
+            "Get the full schema configuration for a connection - which schemas, tables, "
+            "and columns are currently synced. Use this to confirm a column exists before "
+            "checking its downstream impact."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "connection_id": {"type": "string", "description": "The connection ID."},
+            },
+            "required": ["connection_id"],
+        },
+    },
+    {
+        "name": "summarize_impact",
+        "description": (
+            "Look up downstream impact of changing a column in a Fivetran-landed warehouse table. "
+            "Returns dbt models, dashboards, reports, and ML features that depend on it, plus "
+            "owner contacts and recommended deprecation period. "
+            "Call this AFTER confirming the column exists via get_connection_schema_config."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "table": {"type": "string", "description": "Fully-qualified table, e.g. 'stripe.customers'."},
+                "column": {"type": "string", "description": "Column name, e.g. 'customer_segment'."},
+            },
+            "required": ["table", "column"],
+        },
+    },
+]
 
-TOOL_FUNCTIONS = {
-    "summarize_impact": summarize_impact,
+EXECUTION_TOOL_DECLS = [
+    {
+        "name": "modify_connection_column_config",
+        "description": (
+            "Soft-deprecate a column by setting enabled=false. This stops the column from "
+            "syncing on the next run but does NOT delete existing data in the warehouse."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "connection_id": {"type": "string", "description": "The connection ID."},
+                "schema_name": {"type": "string", "description": "Schema name, e.g. 'stripe'."},
+                "table_name": {"type": "string", "description": "Table name, e.g. 'customers'."},
+                "column_name": {"type": "string", "description": "Column to deprecate, e.g. 'customer_segment'."},
+                "enabled": {"type": "boolean", "description": "Set to false to soft-deprecate."},
+            },
+            "required": ["connection_id", "schema_name", "table_name", "column_name", "enabled"],
+        },
+    },
+    {
+        "name": "sync_connection",
+        "description": "Trigger a verification sync after making changes to confirm everything still works.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "connection_id": {"type": "string", "description": "The connection ID."},
+            },
+            "required": ["connection_id"],
+        },
+    },
+]
+
+# Map names to functions
+ALL_TOOL_FUNCTIONS = {
+    "list_connections": lambda **kwargs: list_connections(),
+    "get_connection_details": lambda **kwargs: get_connection_details(**kwargs),
+    "get_connection_state": lambda **kwargs: get_connection_state(**kwargs),
+    "get_connection_schema_config": lambda **kwargs: get_connection_schema_config(**kwargs),
+    "summarize_impact": lambda **kwargs: summarize_impact(**kwargs),
+    "modify_connection_column_config": lambda **kwargs: modify_connection_column_config(**kwargs),
+    "sync_connection": lambda **kwargs: sync_connection(**kwargs),
 }
 
 
 # ---------------------------------------------------------------------------
-# Atlas's personality and operating rules
+# System prompts - one for each phase
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """
-You are Atlas, a data change intelligence agent. You help data engineers safely
-make changes to data systems by surfacing the full downstream impact and producing
-a phased deprecation plan with stakeholder communication.
+ANALYSIS_PROMPT = """
+You are Atlas, a data change intelligence agent.
 
-OPERATING RULES:
+The user wants to make a schema change. Your job in this phase is ANALYSIS ONLY.
+Do NOT suggest executing anything yet. Follow these steps in order:
 
-1. Identify the table and column involved in the proposed change.
-2. Before recommending anything, ALWAYS call summarize_impact. Never guess at impact
-   from training data - call the tool and use the real lineage data.
-3. Before calling a tool, briefly state in one sentence what you are about to check.
-4. After receiving the tool result, produce a final report with these exact sections:
+1. Call list_connections to find the relevant Fivetran connector.
+2. Call get_connection_schema_config to confirm the target column exists and is currently synced.
+3. Call get_connection_details to check the connector's health.
+4. Call summarize_impact to discover all downstream dependencies.
+5. Before each tool call, state briefly what you are checking.
+6. After gathering all data, produce a report with these sections:
+
+   ## Connection Info
+   One line: connector name, service type, sync status, last successful sync.
+
+   ## Column Status
+   One line: confirm the column exists and is currently enabled for sync.
 
    ## Impact Summary
-   One paragraph of plain-English summary: what the change is, how many things it
-   affects, and the highest-criticality consequence.
+   One paragraph: what breaks, how many assets affected, highest criticality.
 
    ## Affected Assets
-   Bullet list, one line per downstream asset:
-   - **<name>** (<type>) - owned by <team_lead>, <team>, criticality <tier>
+   Bullet list: **name** (type) - owned by team_lead, team, criticality tier
 
    ## Recommended Deprecation Plan
-   Numbered phased steps with concrete day offsets (Day 0, Day 7, Day 14, etc.),
-   based on the recommended_deprecation_days value from the tool result.
+   Numbered steps with day offsets based on the recommended notice period.
 
    ## Stakeholder Messages
-   For each unique owning team, draft a Slack message (3-5 sentences). Tone:
-   - Technical and direct for engineering/analytics teams
-   - Business-focused and concise for sales, finance, exec teams
-   Include the team's Slack channel as a header for each message.
+   For each unique team, draft a Slack message (3-5 sentences).
+   Technical tone for engineering teams, business tone for exec/sales.
+   Include the Slack channel as header.
 
-5. If the column has zero downstream impact, say so clearly in one short paragraph
-   and recommend proceeding with a short deprecation window. Skip the stakeholder
-   messages section.
-6. If the column does not exist, state that plainly. Do not invent a plan.
-7. Be direct. No apologies. No "I hope this helps." No sign-off.
+   ## Execution Preview
+   State exactly which Fivetran API call will be made if the user approves:
+   "modify_connection_column_config(connection_id=X, schema_name=X, table_name=X, column_name=X, enabled=false)"
+
+7. End with: "Awaiting your approval to execute."
+8. Be direct. No fluff. No apologies.
+"""
+
+EXECUTION_PROMPT = """
+You are Atlas, executing an approved deprecation plan.
+
+The user has approved the plan. Now execute it:
+
+1. Call modify_connection_column_config with enabled=false to soft-deprecate the column.
+2. Call sync_connection to trigger a verification sync.
+3. After both calls succeed, produce a short confirmation:
+
+   ## Execution Complete
+   - Column: what was deprecated
+   - Action: enabled set to false
+   - Sync: triggered, status
+   - What happens next: the column will stop syncing on the next run.
+     Existing data in the warehouse is preserved.
+
+4. Be brief. The analysis was already presented. Just confirm execution.
 """
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Core agent loop (used by both phases)
 # ---------------------------------------------------------------------------
 
-def _safe(part, attr):
-    """Return part.attr if present, else None - protects against SDK variation."""
-    return getattr(part, attr, None)
+def _run_agent_loop(contents: list, tool_decls: list, system_prompt: str, phase_name: str, max_steps: int = 8) -> str:
+    """Generic agent loop: send messages, handle tool calls, return final text."""
 
-
-def _slugify(text: str) -> str:
-    """Turn a request string into a safe filename fragment."""
-    return "".join(c if c.isalnum() else "_" for c in text.lower())[:50]
-
-
-def _save_report(scenario_num: int, request: str, report: str) -> Path:
-    """Write the final report to a markdown file and return its path."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"scenario_{scenario_num}_{_slugify(request[:30])}_{timestamp}.md"
-    path = REPORTS_DIR / filename
-
-    header = f"# Atlas Report - Scenario {scenario_num}\n\n"
-    header += f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-    header += f"**Request:** {request}\n\n---\n\n"
-
-    path.write_text(header + report, encoding="utf-8")
-    return path
-
-
-# ---------------------------------------------------------------------------
-# The agent loop
-# ---------------------------------------------------------------------------
-
-def run_atlas(user_request: str, scenario_num: int = 1) -> str:
-    """Run one Atlas planning cycle. Returns the final report string."""
-
-    print(f"\n{'=' * 72}")
-    print(f"  SCENARIO {scenario_num}")
-    print(f"  Request: {user_request}")
-    print(f"{'=' * 72}\n")
-
-    tools = types.Tool(function_declarations=[SUMMARIZE_IMPACT_DECL])
+    tools = types.Tool(function_declarations=tool_decls)
     config = types.GenerateContentConfig(
-        system_instruction=SYSTEM_PROMPT,
+        system_instruction=system_prompt,
         tools=[tools],
     )
 
-    contents = [
-        types.Content(role="user", parts=[types.Part(text=user_request)])
-    ]
+    final_text = ""
 
-    final_report = ""
-
-    # Cap iterations so a misbehaving model can't spin forever
-    for step in range(1, 6):
+    for step in range(1, max_steps + 1):
         try:
             response = client.models.generate_content(
-                model=MODEL_NAME,
+                model=MODEL,
                 contents=contents,
                 config=config,
             )
         except Exception as e:
-            print(f"[!] Gemini API error: {e}")
+            print(f"\n  [!] Gemini API error: {e}")
             return f"ERROR: {e}"
 
         if not response.candidates:
-            print("[!] No candidates returned. Stopping.")
+            print("\n  [!] No response from Gemini.")
             return "ERROR: empty response"
 
         candidate = response.candidates[0]
         parts = candidate.content.parts or []
 
-        # Surface any "thinking out loud" text from this turn
-        text_chunks = [_safe(p, "text") for p in parts if _safe(p, "text")]
-        if text_chunks:
-            for chunk in text_chunks:
-                print(chunk)
+        # Print any text Gemini produces this turn
+        text_parts = [getattr(p, "text", None) for p in parts]
+        text_parts = [t for t in text_parts if t]
+        if text_parts:
+            for t in text_parts:
+                print(t)
 
-        # Collect any tool calls
-        function_calls = [_safe(p, "function_call") for p in parts]
-        function_calls = [fc for fc in function_calls if fc]
+        # Collect tool calls
+        fc_list = [getattr(p, "function_call", None) for p in parts]
+        fc_list = [fc for fc in fc_list if fc]
 
-        if not function_calls:
-            # No more tools - this is the final answer
-            final_report = "\n".join(text_chunks).strip()
+        if not fc_list:
+            final_text = "\n".join(text_parts).strip()
             break
 
-        # Append the model's tool-call message, then run each tool
-        print(f"\n  [step {step}] Atlas is calling tools...")
+        # Execute tool calls
+        print(f"\n  [{phase_name} step {step}] Calling tools...")
         contents.append(candidate.content)
 
-        for fc in function_calls:
-            tool_name = fc.name
-            tool_args = dict(fc.args) if fc.args else {}
-            print(f"    -> {tool_name}({tool_args})")
+        for fc in fc_list:
+            name = fc.name
+            args = dict(fc.args) if fc.args else {}
+            print(f"    -> {name}({args})")
 
-            func = TOOL_FUNCTIONS.get(tool_name)
+            func = ALL_TOOL_FUNCTIONS.get(name)
             if not func:
-                result = {"error": f"Unknown tool: {tool_name}"}
+                result = {"error": f"Unknown tool: {name}"}
             else:
                 try:
-                    result = func(**tool_args)
+                    result = func(**args)
                 except Exception as e:
-                    result = {"error": f"Tool crashed: {e}"}
+                    result = {"error": str(e)}
 
             contents.append(types.Content(
                 role="user",
                 parts=[types.Part.from_function_response(
-                    name=tool_name,
+                    name=name,
                     response={"result": result},
                 )],
             ))
-
-        print()  # blank line before next step
+        print()
 
     else:
-        # Loop exhausted without break
-        print("[!] Atlas hit the 5-step limit without producing a final report.")
-        return "ERROR: max steps exceeded"
+        print(f"  [!] {phase_name} hit {max_steps}-step limit.")
+        return "ERROR: max steps"
 
-    # Save the report
-    saved_path = _save_report(scenario_num, user_request, final_report)
-    print(f"\n  [report saved] {saved_path.relative_to(Path(__file__).parent)}\n")
-
-    return final_report
+    return final_text
 
 
 # ---------------------------------------------------------------------------
-# Demo scenarios
+# The full lifecycle
 # ---------------------------------------------------------------------------
 
-SCENARIOS = [
-    # The headline - high-impact change with multiple critical dependencies
-    "I want to drop the customer_segment column from stripe.customers. "
-    "Tell me what will break and how to deprecate it safely.",
+def run_full_lifecycle(user_request: str) -> None:
+    """Run the complete Atlas lifecycle: analyze -> approve -> execute."""
 
-    # The safe case - column with zero dependencies
-    "We're cleaning up old fields. Is it safe to drop lead_source_legacy "
-    "from hubspot.deals?",
-
-    # The unknown - graceful handling of a column that doesn't exist
-    "I need to remove the discount_code column from stripe.customers. "
-    "What depends on it?",
-]
-
-
-def main():
-    single = "--single" in sys.argv
-
+    # ---- Banner ----
     print("\n" + "#" * 72)
     print("  ATLAS - Data Change Intelligence Agent")
-    print("  Powered by Gemini + Fivetran MCP (lineage layer)")
+    print("  Full Lifecycle Demo")
     print("#" * 72)
 
-    scenarios_to_run = SCENARIOS[:1] if single else SCENARIOS
+    # ---- Phase 1: Analysis ----
+    print(f"\n{'=' * 72}")
+    print("  PHASE 1: ANALYSIS")
+    print(f"  Request: {user_request}")
+    print(f"{'=' * 72}\n")
 
-    for i, request in enumerate(scenarios_to_run, start=1):
-        run_atlas(request, scenario_num=i)
+    analysis_contents = [
+        types.Content(role="user", parts=[types.Part(text=user_request)])
+    ]
 
-    print("\n" + "#" * 72)
-    print(f"  Demo complete. {len(scenarios_to_run)} scenario(s) processed.")
-    print(f"  Reports saved to: {REPORTS_DIR}/")
-    print("#" * 72 + "\n")
+    analysis_report = _run_agent_loop(
+        contents=analysis_contents,
+        tool_decls=ANALYSIS_TOOL_DECLS,
+        system_prompt=ANALYSIS_PROMPT,
+        phase_name="analysis",
+    )
 
+    if analysis_report.startswith("ERROR"):
+        print(f"\n  Analysis failed: {analysis_report}")
+        return
+
+    # Save analysis report
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = REPORTS_DIR / f"lifecycle_analysis_{timestamp}.md"
+    report_header = (
+        f"# Atlas Lifecycle Report\n\n"
+        f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"**Request:** {user_request}\n\n---\n\n"
+    )
+    report_path.write_text(report_header + analysis_report, encoding="utf-8")
+    print(f"\n  [analysis saved] {report_path.name}")
+
+    # ---- Phase 2: Human Approval ----
+    print(f"\n{'=' * 72}")
+    print("  PHASE 2: APPROVAL GATE")
+    print(f"{'=' * 72}\n")
+
+    analysis_only = "--analysis" in sys.argv
+
+    if analysis_only:
+        print("  [--analysis flag set, skipping execution]")
+        return
+
+    print("  Atlas has analyzed the change and produced a deprecation plan.")
+    print("  Review the report above before approving.\n")
+
+    try:
+        approval = input("  >>> Approve execution? (yes/no): ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("\n  [interrupted]")
+        return
+
+    if approval not in ("yes", "y"):
+        print("\n  Execution cancelled. No changes were made.")
+        return
+
+    # ---- Phase 3: Execution ----
+    print(f"\n{'=' * 72}")
+    print("  PHASE 3: EXECUTION")
+    print(f"{'=' * 72}\n")
+
+    # Give Gemini the original request + the analysis it produced + approval
+    execution_contents = [
+        types.Content(role="user", parts=[types.Part(text=(
+            f"Original request: {user_request}\n\n"
+            f"Analysis report (already shown to user):\n{analysis_report}\n\n"
+            f"The user has APPROVED execution. Proceed with the deprecation now."
+        ))]),
+    ]
+
+    execution_result = _run_agent_loop(
+        contents=execution_contents,
+        tool_decls=EXECUTION_TOOL_DECLS,
+        system_prompt=EXECUTION_PROMPT,
+        phase_name="execution",
+    )
+
+    # ---- Change Log ----
+    print(f"\n{'=' * 72}")
+    print("  CHANGE LOG (proof of execution)")
+    print(f"{'=' * 72}\n")
+
+    changes = get_change_log()
+    if changes:
+        for entry in changes:
+            print(f"  [{entry['timestamp']}]")
+            print(f"    Action: {entry['action']}")
+            print(f"    Target: {entry['target']}")
+            print(f"    Change: {entry['change']}")
+            print()
+    else:
+        print("  No changes recorded.\n")
+
+    # Save full report (analysis + execution)
+    full_report_path = REPORTS_DIR / f"lifecycle_full_{timestamp}.md"
+    full_content = (
+        report_header
+        + analysis_report
+        + "\n\n---\n\n## Execution Result\n\n"
+        + (execution_result or "No output")
+        + "\n\n## Change Log\n\n```json\n"
+        + json.dumps(changes, indent=2)
+        + "\n```\n"
+    )
+    full_report_path.write_text(full_content, encoding="utf-8")
+    print(f"  [full report saved] {full_report_path.name}")
+
+    # ---- Done ----
+    print(f"\n{'#' * 72}")
+    print("  LIFECYCLE COMPLETE")
+    print(f"  Reports: {REPORTS_DIR}/")
+    print(f"{'#' * 72}\n")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+DEMO_REQUEST = (
+    "I want to drop the customer_segment column from stripe.customers. "
+    "Tell me what will break and how to deprecate it safely."
+)
 
 if __name__ == "__main__":
-    main()
+    run_full_lifecycle(DEMO_REQUEST)
