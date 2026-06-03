@@ -3,6 +3,8 @@
 
 *Built for the Google Cloud Rapid Agent Hackathon 2026 (Fivetran Track)*
 
+> 🌐 **Live Demo:** [https://atlas-fivetran.streamlit.app/](https://atlas-fivetran.streamlit.app/)
+
 ---
 
 ## ⚡ The Problem
