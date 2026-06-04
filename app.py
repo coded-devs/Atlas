@@ -642,6 +642,18 @@ with st.sidebar:
         placeholder="https://hooks.slack.com/services/...",
         help="Paste an Incoming Webhook URL to send notifications directly to Slack. Create one at https://api.slack.com/apps",
     )
+    st.markdown("<br>", unsafe_allow_html=True)
+    telegram_bot_token = st.text_input(
+        "Telegram Bot Token",
+        type="password",
+        placeholder="123456789:ABCdefGHI...",
+        help="Create a bot with BotFather on Telegram and paste the token here.",
+    )
+    telegram_chat_id = st.text_input(
+        "Telegram Chat ID",
+        placeholder="-1001234567890",
+        help="The chat ID of the group or user to send the notification to.",
+    )
 
     st.divider()
     st.markdown("""
@@ -1040,7 +1052,7 @@ if st.session_state.analysis_report and not st.session_state.execution_done:
                     with st.expander(f"📝 Preview message for {notif['team']}", expanded=False):
                         st.code(notif["message"], language=None)
 
-                    col_slack, col_email, col_space = st.columns([1, 1, 2])
+                    col_slack, col_telegram, col_email = st.columns([1, 1, 1])
 
                     with col_slack:
                         if st.button(f"💬 Send to Slack", key=f"slack_{idx}", use_container_width=True):
@@ -1059,6 +1071,27 @@ if st.session_state.analysis_report and not st.session_state.execution_done:
                                     st.error(f"Failed: {e}")
                             else:
                                 st.warning("⚙️ Add your Slack Webhook URL in the sidebar → Integrations")
+
+                    with col_telegram:
+                        if st.button(f"✈️ Send to Telegram", key=f"telegram_{idx}", use_container_width=True):
+                            if telegram_bot_token and telegram_chat_id:
+                                try:
+                                    resp = http_requests.post(
+                                        f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage",
+                                        json={
+                                            "chat_id": telegram_chat_id,
+                                            "text": notif["message"]
+                                        },
+                                        timeout=10,
+                                    )
+                                    if resp.status_code == 200:
+                                        st.success(f"✅ Sent to Telegram!")
+                                    else:
+                                        st.error(f"Telegram error: {resp.status_code} — {resp.text}")
+                                except Exception as e:
+                                    st.error(f"Failed: {e}")
+                            else:
+                                st.warning("⚙️ Add Telegram Bot Token and Chat ID in sidebar")
 
                     with col_email:
                         if notif["email"]:
