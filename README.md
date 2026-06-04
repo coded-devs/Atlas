@@ -34,24 +34,24 @@ Atlas isn't a chatbot; it's an agentic workflow. When given a complex prompt (e.
 
 ```mermaid
 flowchart TD
-    User([👤 User: &quot;Drop customer_segment from stripe.customers&quot;])
-    UI[🖥️ Streamlit UI]
-    Gemini{{🧠 Gemini 3<br/>reasoning &amp; planning}}
-    subgraph Tools[Agent Tools]
-        Fivetran[🔌 Fivetran MCP<br/>connections · schema · sync]
-        Lineage[🕸️ Lineage Engine<br/>downstream impact · owners]
-        Ranker[⚙️ Semantic Ranker<br/>deterministic severity]
+    User(["👤 User: Drop customer_segment from stripe.customers"])
+    UI["🖥️ Streamlit UI"]
+    Gemini{{"🧠 Gemini 3 — reasoning &amp; planning"}}
+    subgraph Tools["Agent Tools"]
+        Fivetran["🔌 Fivetran MCP<br/>connections · schema · sync"]
+        Lineage["🕸️ Lineage Engine<br/>downstream impact · owners"]
+        Ranker["⚙️ Semantic Ranker<br/>deterministic severity"]
     end
-    Gate{🛡️ Approval Gate<br/>human in the loop}
-    Exec[✅ Execute: soft-deprecate column<br/>+ trigger verification sync]
-    Log[📋 Change Log]
+    Gate{"🛡️ Approval Gate<br/>human in the loop"}
+    Exec["✅ Execute: soft-deprecate column<br/>+ trigger verification sync"]
+    Log["📋 Change Log"]
 
     User --> UI --> Gemini
     Gemini -->|tool calls| Tools
     Tools -->|results| Gemini
     Gemini -->|impact report + severity| Gate
-    Gate -->|❌ reject| UI
-    Gate -->|✅ approve| Exec --> Fivetran
+    Gate -->|reject| UI
+    Gate -->|approve| Exec --> Fivetran
     Exec --> Log --> UI
 ```
 
