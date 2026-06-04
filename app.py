@@ -725,19 +725,34 @@ with st.sidebar:
 
 
 # Main area
-col_input, col_status = st.columns([3, 1])
-
-with col_input:
-    request = st.text_area(
-        "Ask me anything about your data stack, or describe a schema change:",
-        placeholder="e.g., \"What can you do?\" or \"Drop customer_segment from stripe.customers\"",
-        height=80,
-    )
-
-with col_status:
-    st.markdown("&nbsp;")  # spacing
-    st.markdown("&nbsp;")
-    analyze_clicked = st.button("Send", type="primary", use_container_width=True)
+if st.session_state.analysis_report:
+    # Hide input after analysis, show what was asked and a reset button
+    st.markdown(f"**Analysis Target:** `{st.session_state.user_request}`")
+    if st.button("🔄 Start New Analysis", use_container_width=False):
+        st.session_state.analysis_report = None
+        st.session_state.tool_log = []
+        st.session_state.execution_done = False
+        st.session_state.user_request = ""
+        st.session_state.followup_history = []
+        st.rerun()
+    
+    # We set these to false/empty strings so the analysis logic below doesn't run again
+    analyze_clicked = False
+    request = ""
+else:
+    col_input, col_status = st.columns([3, 1])
+    
+    with col_input:
+        request = st.text_area(
+            "Ask me anything about your data stack, or describe a schema change:",
+            placeholder="e.g., \"What can you do?\" or \"Drop customer_segment from stripe.customers\"",
+            height=80,
+        )
+    
+    with col_status:
+        st.markdown("&nbsp;")  # spacing
+        st.markdown("&nbsp;")
+        analyze_clicked = st.button("Send", type="primary", use_container_width=True)
 
 # Welcome card — only show before first interaction
 if not st.session_state.analysis_report and not st.session_state.execution_done:
