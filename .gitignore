@@ -1,7 +1,8 @@
 .env
 __pycache__/
 *.pyc
+.venv/
 .streamlit/secrets.toml
-test_upload.csv
-test_upload.json
+reports/
+test_upload.*
 average_company_lineage.json
