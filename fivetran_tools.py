@@ -346,6 +346,58 @@ def modify_connection_column_config(
     })
 
 
+def rollback_column_config(
+    connection_id: str,
+    schema_name: str,
+    table_name: str,
+    column_name: str,
+) -> dict:
+    """Undo a soft-deprecation by re-enabling a column (sets enabled=True).
+
+    This is the inverse of modify_connection_column_config(enabled=False). It
+    logs a distinct "rollback_column_config" action so the change log clearly
+    shows the reversal — proof that Atlas can safely undo a change.
+
+    Real endpoint: PATCH /v1/connections/{connection_id}/schemas/{schema}/tables/{table}/columns/{column}
+    """
+    conn = _FIXTURE["connections"].get(connection_id)
+    if not conn:
+        return _error(f"Connection '{connection_id}' not found")
+
+    schema = conn["schemas"].get(schema_name)
+    if not schema:
+        return _error(f"Schema '{schema_name}' not found in connection")
+
+    table = schema["tables"].get(table_name)
+    if not table:
+        return _error(f"Table '{table_name}' not found in schema '{schema_name}'")
+
+    column = table["columns"].get(column_name)
+    if not column:
+        return _error(f"Column '{column_name}' not found in table '{table_name}'")
+
+    # Re-enable the column.
+    old_value = column["enabled"]
+    column["enabled"] = True
+
+    _FIXTURE["change_log"].append({
+        "timestamp": datetime.now(tz=timezone.utc).isoformat() + "Z",
+        "action": "rollback_column_config",
+        "connection_id": connection_id,
+        "target": f"{schema_name}.{table_name}.{column_name}",
+        "change": f"enabled: {old_value} -> True",
+    })
+
+    return _success({
+        "connection_id": connection_id,
+        "schema": schema_name,
+        "table": table_name,
+        "column": column_name,
+        "enabled": True,
+        "rolled_back_at": datetime.now(tz=timezone.utc).isoformat() + "Z",
+    })
+
+
 def sync_connection(connection_id: str) -> dict:
     """Trigger a sync for a connection. Used after a schema change to verify
     everything still works end-to-end.
@@ -416,8 +468,25 @@ if __name__ == "__main__":
     print("\n5. sync_connection('stripe_main_001'):")
     print(json.dumps(sync_connection("stripe_main_001"), indent=2))
 
-    print("\n6. Change log (proves the execution happened):")
+    print("\n6. rollback_column_config — re-enable customer_segment (undo step 4):")
+
+    def _enabled(col):
+        return (_FIXTURE["connections"]["stripe_main_001"]["schemas"]["stripe"]
+                ["tables"]["customers"]["columns"][col]["enabled"])
+
+    print(f"   enabled before rollback: {_enabled('customer_segment')}  (was True, set to False in step 4)")
+    rollback = rollback_column_config(
+        connection_id="stripe_main_001",
+        schema_name="stripe",
+        table_name="customers",
+        column_name="customer_segment",
+    )
+    print(json.dumps(rollback, indent=2))
+    print(f"   enabled after rollback:  {_enabled('customer_segment')}")
+    print("   -> full lifecycle observed: True -> False (modify) -> True (rollback)")
+
+    print("\n7. Change log (proves modify, sync, and rollback all happened):")
     print(json.dumps(get_change_log(), indent=2))
 
-    print("\n7. Error handling — bad connection ID:")
+    print("\n8. Error handling — bad connection ID:")
     print(json.dumps(get_connection_details("does_not_exist"), indent=2))

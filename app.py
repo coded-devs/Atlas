@@ -24,12 +24,14 @@ from dotenv import load_dotenv
 from lineage import summarize_impact, load_default, load_graph, calculate_semantic_risk
 from gemini_client import smart_generate
 from demo_cache import check_analysis_cache, check_execution_cache
+from lineage_viz import build_lineage_graph
 from fivetran_tools import (
     list_connections,
     get_connection_details,
     get_connection_state,
     get_connection_schema_config,
     modify_connection_column_config,
+    rollback_column_config,
     sync_connection,
     get_change_log,
 )
@@ -584,6 +586,8 @@ if "severity" not in st.session_state:
     st.session_state.severity = None
 if "followup_history" not in st.session_state:
     st.session_state.followup_history = []
+if "rollback_done" not in st.session_state:
+    st.session_state.rollback_done = False
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +806,7 @@ if st.session_state.analysis_report:
         st.session_state.execution_done = False
         st.session_state.user_request = ""
         st.session_state.followup_history = []
+        st.session_state.rollback_done = False
         st.rerun()
     
     # We set these to false/empty strings so the analysis logic below doesn't run again
@@ -879,6 +884,7 @@ if analyze_clicked and request.strip():
     st.session_state.tool_log = []
     st.session_state.user_request = request.strip()
     st.session_state.followup_history = []
+    st.session_state.rollback_done = False
 
     st.divider()
 
@@ -1004,6 +1010,26 @@ if st.session_state.analysis_report and not st.session_state.execution_done:
             </div>
         </div>
         """, unsafe_allow_html=True)
+
+    # --- Feature 1: Interactive Dependency Graph ---
+    # Works for both cached and live responses: we pull the analyzed
+    # table/column straight from the summarize_impact tool call, then render
+    # the lineage as a Graphviz chart (client-side, no system binary needed).
+    _graph_table = None
+    _graph_column = None
+    for entry in st.session_state.tool_log:
+        if entry["tool"] == "summarize_impact":
+            _graph_table = entry["args"].get("table")
+            _graph_column = entry["args"].get("column")
+            break
+
+    if _graph_table and _graph_column:
+        st.subheader("Dependency Graph")
+        _dot = build_lineage_graph(_graph_table, _graph_column)
+        if _dot:
+            st.graphviz_chart(_dot, use_container_width=True)
+        else:
+            st.info("Column not found in lineage graph")
 
     # Report card
     report_title = "📊 Impact Analysis Report" if st.session_state.tool_log else "💬 Atlas Response"
@@ -1334,6 +1360,7 @@ if st.session_state.analysis_report and not st.session_state.execution_done:
         st.session_state.execution_done = True
         st.session_state.execution_result = exec_result
         st.session_state.tool_log.extend(exec_log)
+        st.session_state.rollback_done = False  # fresh execution can be rolled back
 
         st.markdown(exec_result)
 
@@ -1454,3 +1481,49 @@ if st.session_state.execution_done and st.session_state.execution_result:
     with st.expander("🔧 Full tool call trace"):
         for i, entry in enumerate(st.session_state.tool_log, 1):
             st.code(f"Step {i}: {entry['tool']}({json.dumps(entry['args'])})", language=None)
+
+    # --- Feature 2: Rollback ---
+    # Recover the column that was deprecated during execution so we can undo it.
+    _rb_target = None
+    for entry in st.session_state.tool_log:
+        if entry["tool"] == "modify_connection_column_config":
+            _a = entry["args"]
+            _rb_target = (
+                _a.get("connection_id"),
+                _a.get("schema_name"),
+                _a.get("table_name"),
+                _a.get("column_name"),
+            )  # keep the last modify if there were several
+
+    if _rb_target and all(_rb_target):
+        st.markdown('<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 1.5rem 0;">', unsafe_allow_html=True)
+
+        if st.session_state.rollback_done:
+            # Surface the rollback change-log entry alongside the success message.
+            _rb_entry = next(
+                (e for e in reversed(get_change_log()) if e["action"] == "rollback_column_config"),
+                None,
+            )
+            st.success("✅ Change rolled back — the column has been re-enabled (`enabled` set back to `True`).")
+            if _rb_entry:
+                st.markdown(f"""
+                <div style="
+                    background: rgba(99, 102, 241, 0.08);
+                    border-left: 3px solid #6366f1;
+                    border-radius: 0 8px 8px 0;
+                    padding: 0.8rem 1rem;
+                    margin-bottom: 0.6rem;
+                ">
+                    <strong style="color: #a78bfa;">{_rb_entry['action']}</strong><br>
+                    <span style="color: #94a3b8;">Target:</span> <code style="color: #e2e8f0;">{_rb_entry['target']}</code><br>
+                    <span style="color: #94a3b8;">Change:</span> <span style="color: #e2e8f0;">{_rb_entry['change']}</span><br>
+                    <span style="color: #94a3b8;">Time:</span> <span style="color: #64748b;">{_rb_entry['timestamp']}</span>
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.warning("Need to undo? You can rollback this change.")
+            if st.button("⏪ Rollback", use_container_width=False):
+                _conn_id, _schema, _table, _column = _rb_target
+                rollback_column_config(_conn_id, _schema, _table, _column)
+                st.session_state.rollback_done = True
+                st.rerun()
