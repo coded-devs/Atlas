@@ -79,7 +79,20 @@ Two layers keep the demo alive even under free-tier API limits:
 
 ## 📸 Screenshots
 
-*[Add screenshots here]*
+![Atlas landing page](screenshots/1_landing.png)
+*Atlas welcome screen with Fivetran MCP and multi-channel integrations*
+
+![Impact analysis report](screenshots/2_analysis.png)
+*Impact analysis with CRITICAL severity badge and downstream asset mapping*
+
+![Stakeholder notifications](screenshots/3_notification.png)
+*Stakeholder notifications — send directly to Slack, Telegram, or Email*
+
+![Telegram notification](screenshots/4_telegram.png)
+*Real-time Telegram notification delivered by Atlas*
+
+![Approval gate and execution](screenshots/5_execution.png)
+*Human-in-the-loop approval gate, execution result, and change log*
 
 ## 🛠️ Built With
 
