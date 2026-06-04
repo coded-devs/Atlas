@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 
 from lineage import summarize_impact, load_default, load_graph, calculate_semantic_risk
 from gemini_client import smart_generate
+from demo_cache import check_analysis_cache, check_execution_cache
 from fivetran_tools import (
     list_connections,
     get_connection_details,
@@ -808,12 +809,19 @@ if analyze_clicked and request.strip():
             types.Content(role="user", parts=[types.Part(text=request.strip())])
         ]
 
-        report, tool_log = run_agent(
-            contents=contents,
-            tool_decls=ANALYSIS_TOOL_DECLS,
-            system_prompt=ANALYSIS_PROMPT,
-            status_container=status,
-        )
+        # Demo cache: if this matches a rehearsed scenario, serve the pre-baked
+        # report and skip Gemini entirely so the demo survives zero API quota.
+        _cached = check_analysis_cache(request.strip())
+        if _cached:
+            status.write("🟢 Demo mode — serving cached analysis (no API quota used).")
+            report, tool_log = _cached["report"], _cached["tool_log"]
+        else:
+            report, tool_log = run_agent(
+                contents=contents,
+                tool_decls=ANALYSIS_TOOL_DECLS,
+                system_prompt=ANALYSIS_PROMPT,
+                status_container=status,
+            )
 
         _done_label = "Analysis complete" if tool_log else "Done"
         status.update(label=_done_label, state="complete")
@@ -1216,20 +1224,28 @@ if st.session_state.analysis_report and not st.session_state.execution_done:
         """, unsafe_allow_html=True)
 
         with st.status("Executing approved plan...", expanded=True) as exec_status:
-            exec_contents = [
-                types.Content(role="user", parts=[types.Part(text=(
-                    f"Original request: {st.session_state.user_request}\n\n"
-                    f"Analysis (approved by user):\n{st.session_state.analysis_report}\n\n"
-                    f"User has APPROVED. Execute the deprecation now."
-                ))]),
-            ]
+            # Demo cache: serve a pre-baked execution for rehearsed scenarios.
+            # The cache invokes the real (offline) Fivetran mock tools, so the
+            # change log below is genuine even with zero API quota.
+            _cached_exec = check_execution_cache(st.session_state.user_request)
+            if _cached_exec:
+                exec_status.write("🟢 Demo mode — executing cached plan (no API quota used).")
+                exec_result, exec_log = _cached_exec["result"], _cached_exec["tool_log"]
+            else:
+                exec_contents = [
+                    types.Content(role="user", parts=[types.Part(text=(
+                        f"Original request: {st.session_state.user_request}\n\n"
+                        f"Analysis (approved by user):\n{st.session_state.analysis_report}\n\n"
+                        f"User has APPROVED. Execute the deprecation now."
+                    ))]),
+                ]
 
-            exec_result, exec_log = run_agent(
-                contents=exec_contents,
-                tool_decls=EXECUTION_TOOL_DECLS,
-                system_prompt=EXECUTION_PROMPT,
-                status_container=exec_status,
-            )
+                exec_result, exec_log = run_agent(
+                    contents=exec_contents,
+                    tool_decls=EXECUTION_TOOL_DECLS,
+                    system_prompt=EXECUTION_PROMPT,
+                    status_container=exec_status,
+                )
 
             exec_status.update(label="Execution complete", state="complete")
 

@@ -10,21 +10,19 @@ Any non-rate-limit error (bad request, auth, server error, etc.) is
 re-raised unchanged so callers can handle it normally.
 """
 
-# Models to try, in priority order. The first that isn't rate-limited wins.
-# Prioritizing Gemini 3 models as per hackathon requirements.
+# Ordered by preference. Invalid/unavailable models are skipped
+# automatically via 404 handling. Chain ends with high-quota
+# models (1.5-flash: 1500 RPD) as safety net.
 MODEL_CHAIN = [
-    "gemini-3.1-pro",
-    "gemini-3.5-flash",
-    "gemini-3.0-flash",
-    "gemini-3.1-flash-lite",
-    "gemini-2.5-pro",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-3.1-flash-tts",
-    "gemini-2.5-flash-tts",
-    "gemini-2.5-pro-tts",
+    "gemini-3.5-flash",      # newer, 20 RPD free
+    "gemini-3.1-pro",        # may not be available, will skip via 404
+    "gemini-3.0-flash",      # may not be available, will skip via 404
+    "gemini-2.5-flash",      # confirmed working, 20 RPD free
+    "gemini-2.5-pro",        # exists but may have 0 quota
+    "gemini-2.5-flash-lite", # lightweight variant
+    "gemini-2.0-flash",      # confirmed working, 20 RPD free
+    "gemini-1.5-flash",      # older but 1500 RPD free, reliable
+    "gemini-1.5-flash-8b",   # lightweight, 1500 RPD free
 ]
 
 
