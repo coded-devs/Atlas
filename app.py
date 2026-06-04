@@ -894,8 +894,7 @@ if st.session_state.analysis_report and not st.session_state.execution_done:
                     {sev['badge']} &mdash; {sev['label']}
                 </div>
                 <div style="font-size: 0.88rem; color: #94a3b8; margin-top: 0.2rem;">
-                    {sev['rationale']}
-                    {'&nbsp;&nbsp;|&nbsp;&nbsp;<strong style="color:' + text + ';">Minimum notice: ' + str(sev['notice_days']) + ' days</strong>' if sev['notice_days'] > 0 else ''}
+                    {sev['rationale']}{'&nbsp;&nbsp;|&nbsp;&nbsp;<strong style="color:' + text + ';">Minimum notice: ' + str(sev['notice_days']) + ' days</strong>' if sev['notice_days'] > 0 else ''}
                 </div>
                 <div style="font-size: 0.75rem; color: #475569; margin-top: 0.4rem;">⚙️ Calculated by deterministic Semantic Ranker &mdash; not AI-generated</div>
             </div>
