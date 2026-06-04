@@ -643,6 +643,27 @@ with st.sidebar:
         placeholder="https://hooks.slack.com/services/...",
         help="Paste an Incoming Webhook URL to send notifications directly to Slack. Create one at https://api.slack.com/apps",
     )
+    with st.expander("📖 How to connect Slack (2 minutes)", expanded=False):
+        st.markdown("""
+**What you need:** A Slack workspace (free tier works)
+
+**Step 1:** Go to [api.slack.com/apps](https://api.slack.com/apps) and click **"Create New App"** → **"From scratch"**
+
+**Step 2:** Give it a name (e.g. "Atlas Notifications") and select your Slack workspace. Click **Create App**.
+
+**Step 3:** In the left sidebar, click **"Incoming Webhooks"**. Toggle the switch to **ON**.
+
+**Step 4:** Scroll down and click **"Add New Webhook to Workspace"**. Choose which channel should receive Atlas notifications (e.g. #general or create a new #data-alerts channel). Click **Allow**.
+
+**Step 5:** You'll see a Webhook URL that looks like: 
+`https://hooks.slack.com/services/T00.../B00.../xxx...`
+Copy it and paste it in the field above.
+
+**That's it!** When Atlas analyzes a schema change, you can click "Send to Slack" next to any stakeholder message and it will appear in your chosen channel instantly.
+
+**Don't have a Slack workspace?** Create one free at [slack.com/create](https://slack.com/create) — takes 1 minute.
+        """)
+
     st.markdown("<br>", unsafe_allow_html=True)
     telegram_bot_token = st.text_input(
         "Telegram Bot Token",
@@ -655,6 +676,53 @@ with st.sidebar:
         placeholder="-1001234567890",
         help="The chat ID of the group or user to send the notification to.",
     )
+    with st.expander("📖 How to connect Telegram (3 minutes)", expanded=False):
+        st.markdown("""
+**What you need:** A Telegram account (the app on your phone or desktop)
+
+**Step 1: Create a bot**
+Open Telegram and search for **@BotFather** (it has a blue verified checkmark). Start a chat and send:
+`/newbot`
+
+BotFather will ask you for a display name (e.g. "Atlas Notifications") and a username (must end in "bot", e.g. "atlas_notify_bot").
+
+**Step 2: Copy the token**
+BotFather will reply with a long token that looks like:
+`1234567890:ABCdefGHIjklMNOpqrsTUVwxyz`
+Copy this and paste it in the **"Telegram Bot Token"** field above.
+
+**Step 3: Get your Chat ID**
+This tells Atlas WHERE to send messages.
+
+Option A — Send to yourself:
+1. Open a chat with your new bot in Telegram (tap the t.me/your_bot_name link BotFather gave you)
+2. Press **Start**, then send any message like "hello"
+3. Open this URL in your browser (replace YOUR_TOKEN with your actual token):
+   `https://api.telegram.org/botYOUR_TOKEN/getUpdates`
+4. Look for `"chat":{"id":` followed by a number like `7916615222`
+5. Copy that number and paste it in the **"Telegram Chat ID"** field above
+
+Option B — Send to a group:
+1. Create a new Telegram group
+2. Add your bot to the group
+3. Send any message in the group
+4. Check the same URL above — the chat ID will be a negative number like `-1001234567890`
+
+**That's it!** Click "Send to Telegram" next to any stakeholder message and it will arrive in your Telegram chat instantly.
+        """)
+
+    with st.expander("📖 About email notifications", expanded=False):
+        st.markdown("""
+**No setup needed.** When you click "Send Email" next to a stakeholder message, Atlas opens your default email app (Gmail, Outlook, Apple Mail, etc.) with a pre-written message including:
+
+- **To:** The team's email address
+- **Subject:** Schema Change Notice with the table and column name
+- **Body:** The full deprecation notice customized for that team
+
+Just review the email and click Send in your mail app. 
+
+**Tip:** If clicking the button doesn't open your email, make sure you have a default email app set in your browser. For Gmail users in Chrome: go to gmail.com, click the diamond/handler icon in the address bar, and select "Always allow gmail.com to open mailto links".
+        """)
 
     st.divider()
     st.markdown("""
