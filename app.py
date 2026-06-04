@@ -1429,6 +1429,23 @@ if st.session_state.execution_done and st.session_state.execution_result:
     """, unsafe_allow_html=True)
     st.markdown(st.session_state.analysis_report)
 
+    # --- Feature 1: Dependency Graph (persists after execution) ---
+    _exec_graph_table = None
+    _exec_graph_column = None
+    for entry in st.session_state.tool_log:
+        if entry["tool"] == "summarize_impact":
+            _exec_graph_table = entry["args"].get("table")
+            _exec_graph_column = entry["args"].get("column")
+            break
+
+    if _exec_graph_table and _exec_graph_column:
+        st.subheader("Dependency Graph")
+        _exec_dot = build_lineage_graph(_exec_graph_table, _exec_graph_column)
+        if _exec_dot:
+            st.graphviz_chart(_exec_dot, use_container_width=True)
+        else:
+            st.info("Column not found in lineage graph")
+
     st.markdown('<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 1.5rem 0;">', unsafe_allow_html=True)
 
     # Execution result card
