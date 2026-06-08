@@ -23,9 +23,15 @@ from dotenv import load_dotenv
 
 from lineage import summarize_impact, load_default, load_graph, calculate_semantic_risk
 from gemini_client import smart_generate
-from demo_cache import check_analysis_cache, check_execution_cache
+from demo_cache import check_analysis_cache, check_execution_cache, check_inference_cache
 from lineage_viz import build_lineage_graph
 from db_scanner import scan_sqlite, build_discovery_report
+from lineage_inference import (
+    infer_lineage_from_schema,
+    validate_inferred_lineage,
+    TEAM_DIRECTORY,
+    CRITICALITY_LEVELS,
+)
 from fivetran_tools import (
     list_connections,
     get_connection_details,
@@ -421,16 +427,129 @@ def _render_db_scan(scan: dict, source_label: str):
                 )
 
 
+def lineage_to_rows(lineage: dict) -> list:
+    """Flatten a lineage dict into one editable row per downstream asset.
+
+    Columns with no downstream assets still get a single row (with blank asset
+    fields) so they survive an edit/rebuild round-trip.
+    """
+    rows = []
+    for table, info in lineage.get("tables", {}).items():
+        for column, col in info.get("columns", {}).items():
+            downstream = col.get("downstream", [])
+            if not downstream:
+                rows.append({
+                    "table": table, "column": column,
+                    "description": col.get("description", ""),
+                    "is_pii": bool(col.get("is_pii", False)),
+                    "asset_type": "", "asset_name": "",
+                    "owner": "", "criticality": "",
+                })
+                continue
+            for asset in downstream:
+                rows.append({
+                    "table": table, "column": column,
+                    "description": col.get("description", ""),
+                    "is_pii": bool(col.get("is_pii", False)),
+                    "asset_type": asset.get("type", ""),
+                    "asset_name": asset.get("name", ""),
+                    "owner": asset.get("owner", ""),
+                    "criticality": asset.get("criticality", ""),
+                })
+    return rows
+
+
+def rows_to_lineage(rows: list) -> dict:
+    """Rebuild a lineage dict from edited rows (inverse of lineage_to_rows).
+
+    Unknown owners/tiers/types are coerced to safe defaults so the result
+    always validates. Owners and criticality_levels are synthesized from the
+    fixed directory.
+    """
+    tables = {}
+    used_teams = set()
+    tier_priority = {"tier_1": 1, "tier_2": 2, "tier_3": 3}
+
+    for r in rows:
+        table = str(r.get("table") or "").strip()
+        column = str(r.get("column") or "").strip()
+        if not table or not column:
+            continue
+        t = tables.setdefault(table, {"criticality": "tier_3", "team_owner": "data-platform", "columns": {}})
+        c = t["columns"].setdefault(column, {
+            "description": str(r.get("description") or "").strip(),
+            "is_pii": bool(r.get("is_pii")),
+            "downstream": [],
+        })
+        name = str(r.get("asset_name") or "").strip()
+        if name:
+            owner = str(r.get("owner") or "analytics").strip()
+            if owner not in TEAM_DIRECTORY:
+                owner = "analytics"
+            tier = str(r.get("criticality") or "tier_3").strip()
+            if tier not in tier_priority:
+                tier = "tier_3"
+            atype = str(r.get("asset_type") or "dbt_model").strip() or "dbt_model"
+            c["downstream"].append({"type": atype, "name": name, "owner": owner, "criticality": tier})
+            used_teams.add(owner)
+
+    for t in tables.values():
+        tiers = [a["criticality"] for col in t["columns"].values() for a in col["downstream"]]
+        t["criticality"] = min(tiers, key=lambda x: tier_priority.get(x, 99)) if tiers else "tier_3"
+
+    return {
+        "tables": tables,
+        "owners": {team: TEAM_DIRECTORY[team] for team in sorted(used_teams)},
+        "criticality_levels": CRITICALITY_LEVELS,
+    }
+
+
+def run_inference(scan: dict, feedback: str = ""):
+    """Run lineage inference, preferring the demo cache to save API quota.
+
+    Stores the result in session state and flips the pending-review flag.
+    """
+    cached = check_inference_cache(scan)
+    if cached:
+        st.session_state.inferred_lineage = cached
+        st.session_state.inferred_pending = True
+        st.session_state.inference_error = None
+        return
+
+    if scan.get("table_count", 0) > 50:
+        st.warning(
+            f"Large schema ({scan['table_count']} tables) — inference may be "
+            "slow and incomplete. Consider scanning a subset."
+        )
+
+    with st.spinner("Atlas is inferring downstream dependencies..."):
+        result = infer_lineage_from_schema(scan, client, feedback=feedback)
+
+    if "error" in result:
+        st.session_state.inference_error = result["error"]
+        st.session_state.inferred_lineage = None
+        st.session_state.inferred_pending = False
+    else:
+        st.session_state.inferred_lineage = result
+        st.session_state.inferred_pending = True
+        st.session_state.inference_error = None
+
+
 def configure_database_source():
     """
     Render the SQLite upload / demo-database controls in the sidebar.
 
-    Discovery only: we scan the database and stash the result in
-    st.session_state.db_scan for display, but we do NOT convert it into a
-    lineage graph yet. The regular Atlas agent keeps running against the
-    bundled demo lineage so the app stays fully usable.
+    Discovery scans the database; AI inference (triggered from here, reviewed
+    in the main area) turns the schema into a lineage graph. Until the user
+    accepts an inferred graph, the agent runs against the bundled demo lineage
+    so the app stays usable.
     """
-    load_default()  # keep the agent working on demo lineage during discovery
+    # Once a user accepts an AI-inferred graph, keep using it across reruns
+    # instead of resetting to the demo lineage.
+    if st.session_state.get("active_inferred_lineage"):
+        load_graph(st.session_state.active_inferred_lineage)
+    else:
+        load_default()
 
     uploaded = st.file_uploader(
         "Upload a SQLite database", type=["db", "sqlite"]
@@ -445,20 +564,41 @@ def configure_database_source():
     if uploaded is not None:
         scan = scan_sqlite(uploaded.getvalue())
         st.session_state.db_scan = scan
-        _render_db_scan(scan, uploaded.name)
-        return
-
-    if use_demo:
+        # A new upload invalidates any prior inference.
+        st.session_state.inferred_pending = False
+        st.session_state.inferred_lineage = None
+    elif use_demo:
         scan = scan_sqlite(demo_db_path.read_bytes())
         st.session_state.db_scan = scan
-        _render_db_scan(scan, "demo_warehouse.db")
+        st.session_state.inferred_pending = False
+        st.session_state.inferred_lineage = None
+    else:
+        scan = st.session_state.get("db_scan")
+
+    if not scan:
+        st.info("Upload a SQLite file or use the demo database to discover its schema.")
         return
 
-    # Nothing uploaded this run — re-show the last scan if we have one.
-    if st.session_state.get("db_scan"):
-        _render_db_scan(st.session_state.db_scan, "previous scan")
-    else:
-        st.info("Upload a SQLite file or use the demo database to discover its schema.")
+    _render_db_scan(scan, uploaded.name if uploaded is not None else "demo_warehouse.db")
+
+    if "error" in scan:
+        return
+
+    # --- AI lineage inference trigger ---
+    if st.button("✨ Auto-Discover Lineage with AI", type="primary", use_container_width=True):
+        run_inference(scan)
+        st.rerun()
+
+    if st.session_state.get("inference_error"):
+        st.error(f"Inference failed: {st.session_state.inference_error}")
+        if st.button("🔁 Retry inference", use_container_width=True):
+            st.session_state.inference_error = None
+            run_inference(scan)
+            st.rerun()
+
+    if st.session_state.get("active_inferred_lineage"):
+        _n_tables = len(st.session_state.active_inferred_lineage["tables"])
+        st.success(f"🎯 Atlas is using AI-inferred lineage for {_n_tables} table(s).")
 
 
 def configure_data_source():
@@ -673,6 +813,14 @@ if "rollback_done" not in st.session_state:
     st.session_state.rollback_done = False
 if "db_scan" not in st.session_state:
     st.session_state.db_scan = None
+if "inferred_lineage" not in st.session_state:
+    st.session_state.inferred_lineage = None
+if "inferred_pending" not in st.session_state:
+    st.session_state.inferred_pending = False
+if "active_inferred_lineage" not in st.session_state:
+    st.session_state.active_inferred_lineage = None
+if "inference_error" not in st.session_state:
+    st.session_state.inference_error = None
 
 
 # ---------------------------------------------------------------------------
@@ -881,6 +1029,100 @@ Just review the email and click Send in your mail app.
     """, unsafe_allow_html=True)
 
 
+# ---------------------------------------------------------------------------
+# AI-inferred lineage review (Day 6) — shown after "Auto-Discover Lineage"
+# ---------------------------------------------------------------------------
+
+if st.session_state.get("inferred_pending") and st.session_state.get("inferred_lineage"):
+    _inf = st.session_state.inferred_lineage
+    _n_tables = len(_inf["tables"])
+    _n_columns = sum(len(t["columns"]) for t in _inf["tables"].values())
+
+    st.markdown('<hr style="border: none; border-top: 1px solid rgba(255,255,255,0.06); margin: 1rem 0;">', unsafe_allow_html=True)
+    st.markdown(f"""
+    <div style="
+        background: rgba(168, 85, 247, 0.08);
+        border: 1px solid rgba(168, 85, 247, 0.25);
+        border-radius: 12px;
+        padding: 1.2rem 1.5rem;
+        margin-bottom: 1rem;
+    ">
+        <h3 style="color: #c4b5fd; margin: 0 0 0.3rem 0; font-size: 1.3rem;">✨ AI-Inferred Lineage — Review &amp; Edit</h3>
+        <p style="color: #94a3b8; margin: 0; font-size: 0.9rem;">
+            Gemini inferred downstream dependencies for <strong style="color:#e2e8f0;">{_n_tables} table(s)</strong>
+            across <strong style="color:#e2e8f0;">{_n_columns} column(s)</strong>. Edit any cell below, then accept.
+            One row per downstream asset — add or delete rows freely. Leave the asset fields blank for a column with no dependencies.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    _rows = lineage_to_rows(_inf)
+    _edited = st.data_editor(
+        _rows,
+        num_rows="dynamic",
+        use_container_width=True,
+        key="lineage_editor",
+        column_config={
+            "table": "Table",
+            "column": "Column",
+            "description": "Description",
+            "is_pii": st.column_config.CheckboxColumn("PII"),
+            "asset_type": st.column_config.SelectboxColumn(
+                "Asset type", options=["", "dbt_model", "dashboard", "ml_feature", "scheduled_report"]
+            ),
+            "asset_name": "Asset name",
+            "owner": st.column_config.SelectboxColumn(
+                "Owner team", options=[""] + sorted(TEAM_DIRECTORY.keys())
+            ),
+            "criticality": st.column_config.SelectboxColumn(
+                "Criticality", options=["", "tier_1", "tier_2", "tier_3"]
+            ),
+        },
+    )
+
+    col_accept, col_reinfer = st.columns([1, 2])
+    with col_accept:
+        _accept = st.button("✅ Accept and Use This Lineage", type="primary", use_container_width=True)
+
+    with col_reinfer:
+        _feedback = st.text_input(
+            "Re-infer hint",
+            placeholder='e.g., "Treat all email columns as tier_1" — then click Re-infer',
+            key="reinfer_feedback",
+            label_visibility="collapsed",
+        )
+        _reinfer = st.button("🔄 Re-infer with feedback", use_container_width=True)
+
+    if _accept:
+        # st.data_editor may return a list of dicts or a DataFrame depending on
+        # the Streamlit version / pandas availability — normalize to row dicts.
+        if hasattr(_edited, "to_dict"):
+            _final_rows = _edited.to_dict("records")
+        else:
+            _final_rows = list(_edited)
+        _rebuilt = rows_to_lineage(_final_rows)
+        _ok, _errs = validate_inferred_lineage(_rebuilt)
+        if not _ok:
+            st.error("Edited lineage is invalid: " + "; ".join(_errs))
+        else:
+            load_graph(_rebuilt)
+            st.session_state.active_inferred_lineage = _rebuilt
+            st.session_state.inferred_pending = False
+            _acc_tables = len(_rebuilt["tables"])
+            _acc_columns = sum(len(t["columns"]) for t in _rebuilt["tables"].values())
+            st.success(
+                f"🎯 Atlas now using AI-inferred lineage for {_acc_tables} tables "
+                f"across {_acc_columns} columns. Ask Atlas about any column above."
+            )
+            st.rerun()
+
+    if _reinfer:
+        _scan = st.session_state.get("db_scan")
+        if _scan:
+            run_inference(_scan, feedback=_feedback or "")
+            st.rerun()
+
+
 # Main area
 if st.session_state.analysis_report:
     # Hide input after analysis, show what was asked and a reset button
@@ -913,7 +1155,7 @@ else:
         analyze_clicked = st.button("Send", type="primary", use_container_width=True)
 
 # Welcome card — only show before first interaction
-if not st.session_state.analysis_report and not st.session_state.execution_done:
+if not st.session_state.analysis_report and not st.session_state.execution_done and not st.session_state.get("inferred_pending"):
     st.markdown("""
     <div style="
         background: rgba(30, 41, 59, 0.4);

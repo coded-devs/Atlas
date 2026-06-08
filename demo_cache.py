@@ -196,6 +196,215 @@ def check_analysis_cache(request: str):
     return None
 
 
+# ---------------------------------------------------------------------------
+# Cached AI-inferred lineage for the bundled demo_warehouse.db
+# ---------------------------------------------------------------------------
+#
+# When a user uploads demo_warehouse.db and clicks "Auto-Discover Lineage with
+# AI", app.py first checks here. On a hit we return this pre-baked inference
+# instantly — zero Gemini calls — so the Day-6 inference flow demos reliably
+# even with exhausted quota. The structure matches lineage.json exactly
+# (load_graph() accepts it directly), and the team names match the
+# lineage_inference.TEAM_DIRECTORY so owners resolve cleanly.
+
+_DEMO_DB_TEAMS = {
+    "finance":     {"slack": "#finance-data",  "email": "finance@example.com",     "lead": "Sarah Okonkwo"},
+    "marketing":   {"slack": "#marketing-ops", "email": "marketing@example.com",   "lead": "Tomás Vega"},
+    "analytics":   {"slack": "#analytics",     "email": "analytics@example.com",   "lead": "Marcus Chen"},
+    "sales":       {"slack": "#sales",         "email": "sales@example.com",       "lead": "James Reilly"},
+    "ml-platform": {"slack": "#ml-platform",   "email": "ml-platform@example.com", "lead": "Daniel Adeyemi"},
+    "growth":      {"slack": "#growth",        "email": "growth@example.com",      "lead": "Aiko Tanaka"},
+    "cfo-office":  {"slack": "#cfo-direct",    "email": "cfo-office@example.com",  "lead": "Robert Kim"},
+}
+
+_DEMO_DB_CRITICALITY = {
+    "tier_1": {"description": "Business-critical. Used by execs or revenue-impacting systems. Requires 2-week deprecation notice minimum.", "deprecation_notice_days": 14},
+    "tier_2": {"description": "Important but recoverable. Team-level analytics. Requires 1-week notice.", "deprecation_notice_days": 7},
+    "tier_3": {"description": "Internal exploration. Minimal notice required.", "deprecation_notice_days": 2},
+}
+
+
+def _col(description, is_pii, downstream):
+    return {"description": description, "is_pii": is_pii, "downstream": downstream}
+
+
+def _asset(atype, name, owner, criticality):
+    return {"type": atype, "name": name, "owner": owner, "criticality": criticality}
+
+
+_DEMO_DB_LINEAGE = {
+    "tables": {
+        "stripe_customers": {
+            "criticality": "tier_1",
+            "team_owner": "data-platform",
+            "columns": {
+                "id": _col("Unique customer ID, primary key", False, [
+                    _asset("dbt_model", "mart_customers", "analytics", "tier_1"),
+                    _asset("dashboard", "Executive Revenue Dashboard", "cfo-office", "tier_1"),
+                ]),
+                "email": _col("Customer email address", True, [
+                    _asset("scheduled_report", "Weekly Marketing Send List", "marketing", "tier_2"),
+                ]),
+                "customer_segment": _col("Marketing-assigned segment label", False, [
+                    _asset("dbt_model", "mart_customer_segments", "analytics", "tier_2"),
+                    _asset("dashboard", "Revenue by Segment", "sales", "tier_1"),
+                    _asset("ml_feature", "churn_predictor_v3", "ml-platform", "tier_2"),
+                ]),
+                "name": _col("Customer full name", True, [
+                    _asset("dbt_model", "mart_customers", "analytics", "tier_2"),
+                ]),
+                "created_at": _col("When the customer signed up", False, [
+                    _asset("dashboard", "Cohort Analysis", "growth", "tier_3"),
+                ]),
+                "is_active": _col("Whether the customer account is active", False, [
+                    _asset("dashboard", "Active Accounts Overview", "growth", "tier_3"),
+                ]),
+            },
+        },
+        "stripe_subscriptions": {
+            "criticality": "tier_1",
+            "team_owner": "data-platform",
+            "columns": {
+                "id": _col("Subscription ID, primary key", False, [
+                    _asset("dbt_model", "fct_subscriptions", "finance", "tier_1"),
+                ]),
+                "customer_id": _col("FK to stripe_customers.id", False, [
+                    _asset("dbt_model", "fct_subscriptions", "finance", "tier_1"),
+                    _asset("dashboard", "MRR Dashboard", "cfo-office", "tier_1"),
+                ]),
+                "plan_name": _col("Subscription plan tier name", False, [
+                    _asset("dashboard", "Plan Distribution", "growth", "tier_2"),
+                ]),
+                "status": _col("Subscription status (active/canceled/past_due)", False, [
+                    _asset("dashboard", "Churn Dashboard", "growth", "tier_1"),
+                ]),
+                "mrr": _col("Monthly recurring revenue for the subscription", False, [
+                    _asset("dbt_model", "fct_mrr", "finance", "tier_1"),
+                    _asset("dashboard", "MRR Dashboard", "cfo-office", "tier_1"),
+                ]),
+                "started_at": _col("When the subscription started", False, [
+                    _asset("dbt_model", "fct_subscriptions", "finance", "tier_3"),
+                ]),
+            },
+        },
+        "stripe_invoices": {
+            "criticality": "tier_1",
+            "team_owner": "data-platform",
+            "columns": {
+                "id": _col("Invoice ID, primary key", False, [
+                    _asset("dbt_model", "fct_invoices", "finance", "tier_1"),
+                ]),
+                "customer_id": _col("FK to stripe_customers.id", False, [
+                    _asset("dbt_model", "fct_invoices", "finance", "tier_1"),
+                ]),
+                "subscription_id": _col("FK to stripe_subscriptions.id", False, [
+                    _asset("dbt_model", "fct_invoices", "finance", "tier_1"),
+                ]),
+                "amount": _col("Invoice amount in USD", False, [
+                    _asset("dbt_model", "fct_revenue", "finance", "tier_1"),
+                    _asset("dashboard", "Executive Revenue Dashboard", "cfo-office", "tier_1"),
+                ]),
+                "status": _col("Invoice status (paid/open/void)", False, [
+                    _asset("dashboard", "Billing Health", "finance", "tier_2"),
+                ]),
+                "created_at": _col("When the invoice was created", False, [
+                    _asset("dbt_model", "fct_invoices", "finance", "tier_3"),
+                ]),
+            },
+        },
+        "hubspot_deals": {
+            "criticality": "tier_1",
+            "team_owner": "data-platform",
+            "columns": {
+                "deal_id": _col("HubSpot deal ID, primary key", False, [
+                    _asset("dbt_model", "mart_sales_pipeline", "sales", "tier_2"),
+                ]),
+                "company_name": _col("Company associated with the deal", False, [
+                    _asset("dashboard", "Sales Pipeline Health", "sales", "tier_2"),
+                ]),
+                "amount": _col("Deal value in USD", False, [
+                    _asset("dbt_model", "mart_sales_pipeline", "sales", "tier_1"),
+                    _asset("dashboard", "Sales Pipeline Health", "sales", "tier_1"),
+                ]),
+                "deal_stage": _col("Stage in the sales funnel", False, [
+                    _asset("dashboard", "Sales Pipeline Health", "sales", "tier_1"),
+                ]),
+                "lead_source": _col("Where the lead originated", False, [
+                    _asset("dashboard", "Lead Source Attribution", "marketing", "tier_2"),
+                    _asset("ml_feature", "lead_score_v2", "ml-platform", "tier_2"),
+                ]),
+                "owner_email": _col("Sales rep who owns the deal", True, [
+                    _asset("dashboard", "Rep Performance", "sales", "tier_2"),
+                ]),
+            },
+        },
+        "hubspot_contacts": {
+            "criticality": "tier_2",
+            "team_owner": "data-platform",
+            "columns": {
+                "contact_id": _col("HubSpot contact ID, primary key", False, [
+                    _asset("dbt_model", "mart_contacts", "marketing", "tier_2"),
+                ]),
+                "email": _col("Contact email address", True, [
+                    _asset("scheduled_report", "Weekly Marketing Send List", "marketing", "tier_2"),
+                ]),
+                "first_name": _col("Contact first name", True, []),
+                "last_name": _col("Contact last name", True, []),
+                "lifecycle_stage": _col("Marketing lifecycle stage", False, [
+                    _asset("dashboard", "Funnel Conversion", "marketing", "tier_2"),
+                ]),
+            },
+        },
+        "analytics_mrr_by_segment": {
+            "criticality": "tier_1",
+            "team_owner": "data-platform",
+            "columns": {
+                "id": _col("Row ID, primary key", False, []),
+                "month": _col("Reporting month", False, [
+                    _asset("dashboard", "MRR by Segment", "cfo-office", "tier_1"),
+                ]),
+                "segment": _col("Customer segment", False, [
+                    _asset("dashboard", "MRR by Segment", "cfo-office", "tier_1"),
+                ]),
+                "total_mrr": _col("Total MRR for the segment/month", False, [
+                    _asset("dashboard", "MRR by Segment", "cfo-office", "tier_1"),
+                    _asset("scheduled_report", "Monthly Board Deck — Segment Revenue", "cfo-office", "tier_1"),
+                ]),
+                "customer_count": _col("Number of customers in the segment", False, [
+                    _asset("dashboard", "MRR by Segment", "cfo-office", "tier_2"),
+                ]),
+            },
+        },
+    },
+    "owners": _DEMO_DB_TEAMS,
+    "criticality_levels": _DEMO_DB_CRITICALITY,
+}
+
+
+def check_inference_cache(scan_result: dict):
+    """Return a pre-baked inferred lineage for the bundled demo_warehouse.db.
+
+    We fingerprint the scan by its set of table names. The demo database has a
+    distinctive set of six tables, so an exact match means the user uploaded
+    (or loaded) demo_warehouse.db and we can serve the cached inference with
+    zero API quota.
+
+    Args:
+        scan_result: output of db_scanner.scan_sqlite().
+
+    Returns:
+        A lineage dict (lineage.json shape) on a hit, or None on a miss
+        (caller should fall back to live Gemini inference).
+    """
+    if not scan_result or "error" in scan_result:
+        return None
+    scanned = set(scan_result.get("tables", {}).keys())
+    expected = set(_DEMO_DB_LINEAGE["tables"].keys())
+    if scanned == expected:
+        return _DEMO_DB_LINEAGE
+    return None
+
+
 def check_execution_cache(request: str):
     """Return a pre-baked execution result for a known demo scenario, or None.
 

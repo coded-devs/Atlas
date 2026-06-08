@@ -93,15 +93,29 @@ Multi-channel Notifications (Slack, Telegram, Email)
   hubspot_deals, hubspot_contacts, analytics_mrr_by_segment. Coherent data
   with matching ids across tables.
 - `demo_warehouse.db` — Bundled SQLite demo warehouse (generated, ships with repo).
+- `lineage_inference.py` — AI-powered lineage inference (Day 6). Takes a
+  `db_scanner` scan result and asks Gemini (via `smart_generate`) to infer
+  downstream lineage for every column, returning a dict in lineage.json shape.
+  Functions: `infer_lineage_from_schema(scan_result, gemini_client, feedback="")`,
+  `validate_inferred_lineage(lineage_dict) -> (bool, errors)`. Owners and
+  criticality_levels are synthesized deterministically from `TEAM_DIRECTORY`
+  (7 allowed teams); the model only produces the `tables` block, which is
+  normalized (unknown teams→analytics, unknown tiers→tier_3). On any failure
+  returns `{"error": ...}`. app.py renders the result in an editable
+  `st.data_editor` review panel before the user accepts it via `load_graph()`.
+  `demo_cache.check_inference_cache()` serves a pre-baked inference for
+  `demo_warehouse.db` (matched by table-name set) so the demo uses zero quota.
 
 ### Caching & Resilience
 - `demo_cache.py` — Pre-cached responses for 3 demo scenarios so the app
   works with ZERO Gemini API quota. Functions: `check_analysis_cache()`,
-  `check_execution_cache()`. Fuzzy matches on keywords in the request.
+  `check_execution_cache()`, `check_inference_cache()`. Fuzzy matches on
+  keywords in the request (or table-name set for inference).
   Cached scenarios:
   1. "customer_segment" + "stripe" → full CRITICAL report
   2. "lead_source_legacy" + "hubspot" → zero-impact INFO report
   3. "discount_code" + "stripe" → column not found
+  4. `demo_warehouse.db` table set → full inferred lineage (6 tables)
 
 ### Config
 - `.env` — Contains `GEMINI_API_KEY=...` (NEVER committed, gitignored)
