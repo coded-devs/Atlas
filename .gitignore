@@ -6,4 +6,3 @@ __pycache__/
 reports/
 test_upload.*
 average_company_lineage.json
-CLAUDE.md
