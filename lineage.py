@@ -211,6 +211,131 @@ def calculate_semantic_risk(table: str, column: str) -> dict:
         }
 
 
+def get_table_columns(table: str) -> list:
+    """Return the list of column names for a table, or [] if unknown."""
+    table_info = _GRAPH["tables"].get(table)
+    if not table_info:
+        return []
+    return list(table_info["columns"].keys())
+
+
+def summarize_table_impact(table: str) -> dict:
+    """Aggregate the downstream impact of disabling an ENTIRE table.
+
+    Loops every column in the table, unions their downstream assets, and
+    rolls up the strictest criticality and the set of affected teams. Used
+    for the "disable table sync" change type, where the blast radius is the
+    sum of every column's dependencies.
+    """
+    table_info = _GRAPH["tables"].get(table)
+    if not table_info:
+        return {"found": False, "table": table, "reason": f"Table '{table}' not in lineage graph"}
+
+    assets = []
+    seen = set()  # dedupe by (name, type) so a column shared across assets isn't double-counted
+    teams = set()
+    columns_with_impact = []
+
+    for column in table_info["columns"]:
+        impact = summarize_impact(table, column)
+        if not impact.get("found") or impact.get("downstream_count", 0) == 0:
+            continue
+        columns_with_impact.append(column)
+        for asset in impact["downstream_assets"]:
+            key = (asset.get("name"), asset.get("type"))
+            if key in seen:
+                continue
+            seen.add(key)
+            assets.append({**asset, "via_column": column})
+            if asset.get("owner"):
+                teams.add(asset["owner"])
+
+    tiers = [a.get("criticality", "tier_3") for a in assets] or ["tier_3"]
+    tier_priority = {"tier_1": 1, "tier_2": 2, "tier_3": 3}
+    strictest = min(tiers, key=lambda t: tier_priority.get(t, 99))
+    policy = get_deprecation_policy(strictest)
+
+    return {
+        "found": True,
+        "table": table,
+        "column_count": len(table_info["columns"]),
+        "columns_with_impact": columns_with_impact,
+        "downstream_assets": assets,
+        "downstream_count": len(assets),
+        "affected_teams": sorted(teams),
+        "highest_criticality": strictest,
+        "recommended_deprecation_days": policy.get("deprecation_notice_days", 7),
+    }
+
+
+def calculate_table_risk(table: str) -> dict:
+    """Deterministic Semantic Ranker for disabling a whole table.
+
+    Same severity tiers as calculate_semantic_risk, but computed over the
+    aggregate impact of every column in the table.
+    """
+    impact = summarize_table_impact(table)
+
+    if not impact.get("found"):
+        return {
+            "severity": "INFO",
+            "badge": "🔵 INFO",
+            "label": "Table not found",
+            "notice_days": 0,
+            "rationale": "Table not found in lineage graph — no downstream dependencies.",
+        }
+
+    count = impact.get("downstream_count", 0)
+    if count == 0:
+        return {
+            "severity": "INFO",
+            "badge": "🔵 INFO",
+            "label": "Safe to disable",
+            "notice_days": 0,
+            "rationale": "No downstream dependencies across any column. Table can be disabled immediately.",
+        }
+
+    tier = impact.get("highest_criticality", "tier_3")
+    cols = len(impact.get("columns_with_impact", []))
+
+    if tier == "tier_1":
+        return {
+            "severity": "CRITICAL",
+            "badge": "🔴 CRITICAL",
+            "label": "Business-critical impact",
+            "notice_days": 14,
+            "rationale": (
+                f"Disabling this table breaks {count} downstream asset(s) across "
+                f"{cols} column(s). At least one is Tier 1 (exec-facing or revenue-critical). "
+                "Minimum 2-week deprecation notice required."
+            ),
+        }
+    elif tier == "tier_2":
+        return {
+            "severity": "HIGH",
+            "badge": "🟠 HIGH",
+            "label": "Significant impact",
+            "notice_days": 7,
+            "rationale": (
+                f"Disabling this table breaks {count} downstream asset(s) across "
+                f"{cols} column(s). Highest tier is Tier 2 (team-level analytics). "
+                "Minimum 1-week deprecation notice required."
+            ),
+        }
+    else:
+        return {
+            "severity": "WARNING",
+            "badge": "🟡 WARNING",
+            "label": "Low-risk impact",
+            "notice_days": 2,
+            "rationale": (
+                f"Disabling this table breaks {count} downstream asset(s) across "
+                f"{cols} column(s). All are Tier 3 (internal/exploratory). "
+                "Minimal notice required — 2 days recommended."
+            ),
+        }
+
+
 # Quick self-test — run `python lineage.py` to verify the file works
 if __name__ == "__main__":
     print("=== Testing lineage.py ===\n")
@@ -228,3 +353,12 @@ if __name__ == "__main__":
 
     print("\n4. Testing unknown column (should fail gracefully):")
     print(json.dumps(find_downstream("stripe.customers", "fake_column"), indent=2))
+
+    print("\n5. Table-level impact of disabling stripe.customers:")
+    table_impact = summarize_table_impact("stripe.customers")
+    print(f"   columns: {table_impact['column_count']}, "
+          f"unique downstream assets: {table_impact['downstream_count']}, "
+          f"teams: {table_impact['affected_teams']}")
+
+    print("\n6. Table risk (deterministic) for stripe.customers:")
+    print(json.dumps(calculate_table_risk("stripe.customers"), indent=2))

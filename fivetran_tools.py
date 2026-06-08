@@ -398,6 +398,105 @@ def rollback_column_config(
     })
 
 
+def rename_column_config(
+    connection_id: str,
+    schema_name: str,
+    table_name: str,
+    column_name: str,
+    new_column_name: str,
+) -> dict:
+    """Rename a column's destination name (e.g. customer_segment -> segment_label).
+
+    In a real warehouse a rename has the *same* downstream blast radius as a
+    drop — every dbt model, dashboard, or ML feature referencing the old name
+    breaks until it is updated. So Atlas analyses it exactly like a drop, but
+    executes a rename instead. Logs a distinct "rename_column_config" action.
+
+    Real endpoint: PATCH /v1/connections/{connection_id}/schemas/{schema}/tables/{table}/columns/{column}
+    """
+    conn = _FIXTURE["connections"].get(connection_id)
+    if not conn:
+        return _error(f"Connection '{connection_id}' not found")
+
+    schema = conn["schemas"].get(schema_name)
+    if not schema:
+        return _error(f"Schema '{schema_name}' not found in connection")
+
+    table = schema["tables"].get(table_name)
+    if not table:
+        return _error(f"Table '{table_name}' not found in schema '{schema_name}'")
+
+    column = table["columns"].get(column_name)
+    if not column:
+        return _error(f"Column '{column_name}' not found in table '{table_name}'")
+
+    # Record the new destination name without dropping the lineage key, so
+    # downstream lookups and rollbacks keep working.
+    column["name_in_destination"] = new_column_name
+    column["renamed_to"] = new_column_name
+
+    _FIXTURE["change_log"].append({
+        "timestamp": datetime.now(tz=timezone.utc).isoformat() + "Z",
+        "action": "rename_column_config",
+        "connection_id": connection_id,
+        "target": f"{schema_name}.{table_name}.{column_name}",
+        "change": f"renamed: {column_name} -> {new_column_name}",
+    })
+
+    return _success({
+        "connection_id": connection_id,
+        "schema": schema_name,
+        "table": table_name,
+        "column": column_name,
+        "new_column_name": new_column_name,
+        "applied_at": datetime.now(tz=timezone.utc).isoformat() + "Z",
+    })
+
+
+def disable_table_sync(
+    connection_id: str,
+    schema_name: str,
+    table_name: str,
+) -> dict:
+    """Disable sync for an entire table (sets the table to enabled=False).
+
+    This stops every column in the table from syncing — a much larger change
+    than deprecating a single column. Logs a "disable_table_sync" action.
+
+    Real endpoint: PATCH /v1/connections/{connection_id}/schemas/{schema}/tables/{table}
+    """
+    conn = _FIXTURE["connections"].get(connection_id)
+    if not conn:
+        return _error(f"Connection '{connection_id}' not found")
+
+    schema = conn["schemas"].get(schema_name)
+    if not schema:
+        return _error(f"Schema '{schema_name}' not found in connection")
+
+    table = schema["tables"].get(table_name)
+    if not table:
+        return _error(f"Table '{table_name}' not found in schema '{schema_name}'")
+
+    old_value = table["enabled"]
+    table["enabled"] = False
+
+    _FIXTURE["change_log"].append({
+        "timestamp": datetime.now(tz=timezone.utc).isoformat() + "Z",
+        "action": "disable_table_sync",
+        "connection_id": connection_id,
+        "target": f"{schema_name}.{table_name}",
+        "change": f"table enabled: {old_value} -> False",
+    })
+
+    return _success({
+        "connection_id": connection_id,
+        "schema": schema_name,
+        "table": table_name,
+        "enabled": False,
+        "applied_at": datetime.now(tz=timezone.utc).isoformat() + "Z",
+    })
+
+
 def sync_connection(connection_id: str) -> dict:
     """Trigger a sync for a connection. Used after a schema change to verify
     everything still works end-to-end.
@@ -485,8 +584,29 @@ if __name__ == "__main__":
     print(f"   enabled after rollback:  {_enabled('customer_segment')}")
     print("   -> full lifecycle observed: True -> False (modify) -> True (rollback)")
 
-    print("\n7. Change log (proves modify, sync, and rollback all happened):")
+    print("\n7. rename_column_config — rename customer_segment -> segment_label:")
+    rename = rename_column_config(
+        connection_id="stripe_main_001",
+        schema_name="stripe",
+        table_name="customers",
+        column_name="customer_segment",
+        new_column_name="segment_label",
+    )
+    print(json.dumps(rename, indent=2))
+
+    print("\n8. disable_table_sync — disable the whole stripe.customers table:")
+    disable = disable_table_sync(
+        connection_id="stripe_main_001",
+        schema_name="stripe",
+        table_name="customers",
+    )
+    print(json.dumps(disable, indent=2))
+    _tbl_enabled = (_FIXTURE["connections"]["stripe_main_001"]["schemas"]["stripe"]
+                    ["tables"]["customers"]["enabled"])
+    print(f"   table enabled flag is now: {_tbl_enabled}")
+
+    print("\n9. Change log (modify, sync, rollback, rename, disable_table):")
     print(json.dumps(get_change_log(), indent=2))
 
-    print("\n8. Error handling — bad connection ID:")
+    print("\n10. Error handling — bad connection ID:")
     print(json.dumps(get_connection_details("does_not_exist"), indent=2))
