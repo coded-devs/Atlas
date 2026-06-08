@@ -25,6 +25,7 @@ from lineage import summarize_impact, load_default, load_graph, calculate_semant
 from gemini_client import smart_generate
 from demo_cache import check_analysis_cache, check_execution_cache
 from lineage_viz import build_lineage_graph
+from db_scanner import scan_sqlite, build_discovery_report
 from fivetran_tools import (
     list_connections,
     get_connection_details,
@@ -387,6 +388,79 @@ def build_graph_from_csv(text: str) -> dict:
     }
 
 
+def _render_db_scan(scan: dict, source_label: str):
+    """Show the discovery report + success banner for a completed scan."""
+    if "error" in scan:
+        st.error(f"Could not scan database: {scan['error']}")
+        return
+    st.success(
+        f"Database scanned! {scan['table_count']} tables, "
+        f"{scan['column_count']} columns found."
+    )
+    with st.expander("🗄️ Discovered Schema", expanded=True):
+        st.caption(f"Source: {source_label}")
+        st.markdown(build_discovery_report(scan))
+        for table, info in scan["tables"].items():
+            st.markdown(f"**`{table}`**")
+            rows = []
+            for col in info["columns"]:
+                flags = []
+                if col["primary_key"]:
+                    flags.append("PK")
+                if col["notnull"]:
+                    flags.append("NOT NULL")
+                rows.append(
+                    f"- `{col['name']}` · {col['type'] or 'ANY'}"
+                    + (f" · {', '.join(flags)}" if flags else "")
+                )
+            st.markdown("\n".join(rows))
+            for fk in info["foreign_keys"]:
+                st.caption(
+                    f"↳ FK: `{fk['from_column']}` → "
+                    f"`{fk['to_table']}.{fk['to_column']}`"
+                )
+
+
+def configure_database_source():
+    """
+    Render the SQLite upload / demo-database controls in the sidebar.
+
+    Discovery only: we scan the database and stash the result in
+    st.session_state.db_scan for display, but we do NOT convert it into a
+    lineage graph yet. The regular Atlas agent keeps running against the
+    bundled demo lineage so the app stays fully usable.
+    """
+    load_default()  # keep the agent working on demo lineage during discovery
+
+    uploaded = st.file_uploader(
+        "Upload a SQLite database", type=["db", "sqlite"]
+    )
+
+    demo_db_path = Path(__file__).parent / "demo_warehouse.db"
+    use_demo = st.button(
+        "Or use demo database", use_container_width=True,
+        disabled=not demo_db_path.exists(),
+    )
+
+    if uploaded is not None:
+        scan = scan_sqlite(uploaded.getvalue())
+        st.session_state.db_scan = scan
+        _render_db_scan(scan, uploaded.name)
+        return
+
+    if use_demo:
+        scan = scan_sqlite(demo_db_path.read_bytes())
+        st.session_state.db_scan = scan
+        _render_db_scan(scan, "demo_warehouse.db")
+        return
+
+    # Nothing uploaded this run — re-show the last scan if we have one.
+    if st.session_state.get("db_scan"):
+        _render_db_scan(st.session_state.db_scan, "previous scan")
+    else:
+        st.info("Upload a SQLite file or use the demo database to discover its schema.")
+
+
 def configure_data_source():
     """
     Render the data-source picker in the sidebar and load the chosen graph
@@ -396,7 +470,7 @@ def configure_data_source():
     st.header("Data source")
     source = st.radio(
         "Lineage data",
-        ("Demo data", "Upload JSON", "Upload CSV"),
+        ("Demo data", "Upload JSON", "Upload CSV", "Upload Database"),
         label_visibility="collapsed",
     )
 
@@ -414,9 +488,18 @@ def configure_data_source():
             "table + column are grouped into one column with several "
             "downstream assets."
         )
+        st.markdown(
+            "**Upload Database** — a SQLite `.db` / `.sqlite` file. Atlas "
+            "auto-discovers every table, column, type, and foreign key. "
+            "(Discovery only for now — lineage inference comes next.)"
+        )
 
     if source == "Demo data":
         load_default()
+        return
+
+    if source == "Upload Database":
+        configure_database_source()
         return
 
     if source == "Upload JSON":
@@ -588,6 +671,8 @@ if "followup_history" not in st.session_state:
     st.session_state.followup_history = []
 if "rollback_done" not in st.session_state:
     st.session_state.rollback_done = False
+if "db_scan" not in st.session_state:
+    st.session_state.db_scan = None
 
 
 # ---------------------------------------------------------------------------
