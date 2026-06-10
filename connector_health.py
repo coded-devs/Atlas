@@ -62,18 +62,19 @@ def humanize_timestamp(iso_str: str) -> str:
 
 
 def status_level(status: dict) -> str:
-    """Classify a connection's status as 'healthy', 'warning', or 'error'."""
+    """Classify a connection's status as 'healthy', 'warning', or 'error'.
+
+    Mapping:
+      - error  (red)    : failed_at is set
+      - warning (yellow): failed_at is None AND warnings is non-empty
+      - healthy (green) : failed_at is None AND no warnings
+    """
     if not isinstance(status, dict):
         return "warning"
     if status.get("failed_at"):
         return "error"
     if status.get("warnings"):
         return "warning"
-    if status.get("setup_state") != "connected":
-        return "warning"
-    if status.get("update_state") not in (None, "on_schedule", "delayed", "rescheduled"):
-        # unknown update states are surfaced as a warning, not silently healthy
-        pass
     return "healthy"
 
 
