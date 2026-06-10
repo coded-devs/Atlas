@@ -20,7 +20,7 @@ downstream impact before making changes.
 ```
 User Request (natural language)
     ↓
-Streamlit UI (app.py)
+Streamlit multi-page UI (app.py entry → pages/1_Atlas_Agent.py)
     ↓
 Gemini LLM (via google-genai SDK)
     ↓ (function calling)
@@ -48,17 +48,47 @@ Multi-channel Notifications (Slack, Telegram, Email)
 
 ## File Map (AUTHORITATIVE — do not invent files)
 
-### Core Agent
-- `app.py` — Streamlit web UI. THE deployed app. All UI logic lives here.
+### Core Agent (multi-page Streamlit app)
+- `app.py` — Streamlit ENTRYPOINT / landing page. Brief intro, three
+  `st.page_link` buttons to the pages below, and quick stats (changes
+  executed, rollbacks, connectors monitored) pulled from the change log.
+  Run with `streamlit run app.py`. Holds NO agent logic anymore.
+- `pages/1_Atlas_Agent.py` — THE agent UI (formerly app.py). All analysis/
+  execution/approval logic, data-source picker, DB scan + AI lineage
+  inference, severity badge, dependency graph, schema diff, stakeholder
+  notifications, follow-up chat, rollback. Lives in `pages/`, so it loads
+  repo-root files via `Path(__file__).resolve().parent.parent`.
+- `pages/2_Audit_Dashboard.py` — Action history from
+  `fivetran_tools.get_change_log()`. 4 metric cards (Total Actions, Columns
+  Deprecated, Tables Disabled, Rollbacks), a styled HTML table (Timestamp |
+  Action | Connector | Target | Change), sidebar filters (action type,
+  connector), and a "Clear log" demo-reset button.
+- `pages/3_Connector_Health.py` — Per-connector status cards (service icon,
+  health dot, humanized last-sync, tables synced, sync frequency), 4 summary
+  metrics, manual Refresh button, and an optional 30s auto-refresh
+  (HTML meta-refresh, off by default).
 - `atlas.py` — Terminal/CLI version of the agent. Same logic, no UI.
 - `gemini_client.py` — Smart model fallback. `smart_generate()` tries
   models in MODEL_CHAIN order, catches 429/503/404, auto-switches.
-  Both app.py and atlas.py import from here.
+  Both the agent page and atlas.py import from here.
+- `connector_health.py` — Pure (no-Streamlit) helpers shared by the inline
+  health check (agent page) and the Connector Health page:
+  `gather_connectors()`, `health_totals()`, `humanize_timestamp()`,
+  `status_level()`. Reads the simulated Fivetran tools.
+- `schema_diff.py` — Before/after schema preview. `build_schema_diff(scan_or_None,
+  table, column, operation, new_name)` returns two column lists with
+  `highlight` ∈ {none, target, changed}; `render_diff_table_html(rows, side,
+  operation)` returns a styled HTML table. Falls back to the active lineage
+  graph's columns when no DB scan is present. Operations: drop, rename,
+  disable_table.
 
 ### Data Layer
 - `lineage.py` — Mock downstream lineage engine.
   Functions: `load_graph()`, `load_default()`, `find_downstream()`,
-  `get_owner()`, `get_deprecation_policy()`, `summarize_impact()`.
+  `get_owner()`, `get_deprecation_policy()`, `summarize_impact()`,
+  `calculate_semantic_risk()` (column severity), and the table-level pair
+  `summarize_table_impact()` / `calculate_table_risk()` (aggregate impact +
+  severity for disabling a whole table), plus `get_table_columns()`.
   Module-level `_GRAPH` global swappable at runtime.
 - `lineage.json` — Seeded demo data. 3 tables:
   - `stripe.customers` (columns: id, email, customer_segment, created_at)
@@ -71,14 +101,20 @@ Multi-channel Notifications (Slack, Telegram, Email)
 ### Fivetran Integration
 - `fivetran_tools.py` — Simulated Fivetran MCP tools. Same tool names
   and response shapes as the official `fivetran/fivetran-mcp` server.py.
-  In-memory fixture with two connections:
+  In-memory fixture with four connections:
   - `stripe_main_001` (service: stripe, schema: stripe)
   - `hubspot_crm_002` (service: hubspot, schema: hubspot)
+  - `salesforce_crm_003` (service: salesforce, schema: salesforce)
+  - `zendesk_support_004` (service: zendesk, schema: zendesk)
   Tools: `list_connections()`, `get_connection_details()`,
   `get_connection_state()`, `get_connection_schema_config()`,
-  `modify_connection_column_config()`, `sync_connection()`,
-  `get_change_log()`.
-  Changes mutate the in-memory fixture and are tracked in `_FIXTURE["change_log"]`.
+  `modify_connection_column_config()` (drop/deprecate),
+  `rename_column_config()` (rename), `disable_table_sync()` (disable table),
+  `rollback_column_config()` (undo), `sync_connection()`,
+  `get_change_log()`, `clear_change_log()`.
+  Changes mutate the in-memory fixture and are tracked in `_FIXTURE["change_log"]`
+  (actions: modify_connection_column_config, rename_column_config,
+  disable_table_sync, rollback_column_config, sync_connection).
   Response envelope: `{"code": "Success", "data": {...}}` or `{"code": "Error", "message": "..."}`.
 
 ### Database Auto-Discovery

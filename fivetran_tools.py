@@ -534,6 +534,11 @@ def get_change_log() -> list:
     return list(_FIXTURE["change_log"])
 
 
+def clear_change_log() -> None:
+    """Wipe the session change log. Used by the Audit Dashboard's demo reset."""
+    _FIXTURE["change_log"].clear()
+
+
 # ---------------------------------------------------------------------------
 # Self-test
 # ---------------------------------------------------------------------------

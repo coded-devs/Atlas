@@ -238,7 +238,9 @@ def summarize_table_impact(table: str) -> dict:
 
     for column in table_info["columns"]:
         impact = summarize_impact(table, column)
-        if not impact.get("found") or impact.get("downstream_count", 0) == 0:
+        # summarize_impact omits "found" on success (only sets found=False on a
+        # miss), so gate on downstream_count, not on a truthy "found".
+        if impact.get("found") is False or impact.get("downstream_count", 0) == 0:
             continue
         columns_with_impact.append(column)
         for asset in impact["downstream_assets"]:

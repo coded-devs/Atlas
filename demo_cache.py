@@ -100,11 +100,116 @@ The column `discount_code` was **not found** in the `stripe.customers` table. I 
 There is nothing to analyze or deprecate — `discount_code` does not exist in `stripe.customers`. Please double-check the column name, or confirm it lives in a different table or connection.
 """
 
+_RENAME_SEGMENT_REPORT = """## Connection Info
+`stripe_main_001` (service: stripe) — status **connected**, last sync succeeded. Pipeline is healthy.
+
+## Column Status
+The column `customer_segment` in `stripe.customers` exists and is currently enabled for sync. You want to rename it to `segment_label`.
+
+## Impact Summary
+Renaming `customer_segment` to `segment_label` has the **same downstream blast radius as a drop** — every asset that references the old name breaks until it is updated. This impacts **5 downstream assets** spanning a dbt model, two dashboards, an ML feature, and a scheduled board report. The highest criticality is **Tier 1**, so the rename must be coordinated with the affected teams before it lands.
+
+## Affected Assets
+- **mart_customer_segments** (dbt_model) — owned by Marcus Chen, analytics-team, tier_2
+- **Revenue by Segment** (dashboard) — owned by James Reilly, sales-leadership, tier_1
+- **Segment Retention Cohorts** (dashboard) — owned by Aiko Tanaka, growth-team, tier_2
+- **churn_predictor_v3** (ml_feature) — owned by Daniel Adeyemi, ml-platform, tier_2
+- **Monthly Board Deck — Segment Revenue** (scheduled_report) — owned by Robert Kim, cfo-office, tier_1
+
+## Recommended Rename Plan
+1. **Day 0:** Announce the rename (`customer_segment` → `segment_label`) to all five affected teams.
+2. **Day 0–7:** Analytics, growth, and ML Platform teams update their references to `segment_label`.
+3. **Day 7–14:** Sales Leadership and CFO Office update the "Revenue by Segment" dashboard and "Monthly Board Deck" report to the new name.
+4. **Day 14:** Apply the rename via Fivetran, then trigger a verification sync.
+
+## Stakeholder Messages
+
+### #analytics
+Hi analytics-team — `customer_segment` in `stripe.customers` is being renamed to `segment_label` in 14 days. Your dbt model `mart_customer_segments` references it; please update to the new name by Day 7 so your pipelines keep building.
+
+### #sales-leads
+Hi sales-leadership — the Tier 1 "Revenue by Segment" dashboard references `customer_segment`, which is being renamed to `segment_label` in 14 days. Please update the dashboard by Day 14 so executive reporting is uninterrupted.
+
+### #growth
+Hi growth-team — your "Segment Retention Cohorts" dashboard uses `customer_segment`. It is being renamed to `segment_label` in 14 days; please update by Day 7.
+
+### #ml-platform
+Hi ml-platform — `churn_predictor_v3` uses `customer_segment` as a feature. It is being renamed to `segment_label` in 14 days. Please update your feature pipeline by Day 7.
+
+### #cfo-direct
+Hi cfo-office — the Tier 1 "Monthly Board Deck — Segment Revenue" report references `customer_segment`, being renamed to `segment_label` in 14 days. Please update by Day 14 to protect board-level reporting.
+"""
+
+_DISABLE_CUSTOMERS_REPORT = """## Connection Info
+`stripe_main_001` (service: stripe) — status **connected**, last sync succeeded. Pipeline is healthy.
+
+## Table Status
+The table `stripe.customers` exists and is currently enabled for sync. **Affected: 4 columns, 10 downstream assets.**
+
+## Impact Summary
+Disabling sync for the entire `stripe.customers` table stops every column from syncing at once. Aggregated across all 4 columns, this breaks **10 unique downstream assets**, including Tier 1 revenue dashboards, finance dbt models, and the executive board report. This is the largest possible change to this connector — the highest criticality is **Tier 1**, requiring a 2-week notice.
+
+## Affected Assets
+- **mart_customers** (dbt_model) — owned by Marcus Chen, analytics-team, tier_1
+- **fct_revenue** (dbt_model) — owned by Sarah Okonkwo, finance-analytics, tier_1
+- **Executive Revenue Dashboard** (dashboard) — owned by Robert Kim, cfo-office, tier_1
+- **Weekly Marketing Send List** (scheduled_report) — owned by Tomás Vega, marketing-ops, tier_2
+- **mart_customer_segments** (dbt_model) — owned by Marcus Chen, analytics-team, tier_2
+- **Revenue by Segment** (dashboard) — owned by James Reilly, sales-leadership, tier_1
+- **Segment Retention Cohorts** (dashboard) — owned by Aiko Tanaka, growth-team, tier_2
+- **churn_predictor_v3** (ml_feature) — owned by Daniel Adeyemi, ml-platform, tier_2
+- **Monthly Board Deck — Segment Revenue** (scheduled_report) — owned by Robert Kim, cfo-office, tier_1
+- **Cohort Analysis** (dashboard) — owned by Aiko Tanaka, growth-team, tier_2
+
+## Recommended Disable Plan
+1. **Day 0:** Announce the table disable to all affected teams; confirm receipt from Tier 1 owners (analytics, finance, cfo-office, sales-leadership).
+2. **Day 0–7:** Teams migrate or freeze every dependency on `stripe.customers`.
+3. **Day 7–14:** Tier 1 dashboards and reports are migrated off the table.
+4. **Day 14:** Disable sync for `stripe.customers`, then trigger a verification sync.
+
+## Stakeholder Messages
+
+### #analytics
+Hi analytics-team — we plan to disable sync for the entire `stripe.customers` table in 14 days. Your models `mart_customers` and `mart_customer_segments` depend on it. Please migrate or freeze these by Day 7.
+
+### #finance-data
+Hi finance-analytics — disabling `stripe.customers` will break `fct_revenue` (Tier 1). Please plan a migration before Day 14.
+
+### #cfo-direct
+Hi cfo-office — the Tier 1 "Executive Revenue Dashboard" and "Monthly Board Deck — Segment Revenue" both depend on `stripe.customers`, which we plan to disable in 14 days. Please ensure these are migrated by Day 14.
+
+### #sales-leads
+Hi sales-leadership — the Tier 1 "Revenue by Segment" dashboard depends on `stripe.customers`. We plan to disable this table in 14 days; please update by Day 14.
+
+### #growth
+Hi growth-team — "Segment Retention Cohorts" and "Cohort Analysis" both depend on `stripe.customers`. Please migrate off it by Day 7.
+
+### #ml-platform
+Hi ml-platform — `churn_predictor_v3` depends on `stripe.customers`. The table will be disabled in 14 days; please update your feature pipeline by Day 7.
+
+### #marketing-ops
+Hi marketing-ops — the "Weekly Marketing Send List" depends on `stripe.customers`. Please find an alternative source before Day 7.
+"""
+
 _CUSTOMER_SEGMENT_EXECUTION = """## Execution Complete
 - **Column:** `stripe.customers.customer_segment`
 - **Action:** `modify_connection_column_config` — `enabled` set to `false` (soft-deprecated)
 - **Verification:** `sync_connection` triggered, status `sync_triggered`
 - **What happens next:** the column stops being written to the warehouse on the next sync. Existing data already in the warehouse is preserved, so this is fully reversible by re-enabling the column.
+"""
+
+_RENAME_SEGMENT_EXECUTION = """## Execution Complete
+- **Column:** `stripe.customers.customer_segment`
+- **Action:** `rename_column_config` — renamed to `segment_label`
+- **Verification:** `sync_connection` triggered, status `sync_triggered`
+- **What happens next:** the column now lands in the warehouse as `segment_label`. Downstream assets must reference the new name; existing data is preserved.
+"""
+
+_DISABLE_CUSTOMERS_EXECUTION = """## Execution Complete
+- **Table:** `stripe.customers`
+- **Action:** `disable_table_sync` — table `enabled` set to `false`
+- **Verification:** `sync_connection` triggered, status `sync_triggered`
+- **What happens next:** every column in `stripe.customers` stops syncing on the next run. Data already in the warehouse is preserved; re-enable the table to resume syncing.
 """
 
 _LEAD_SOURCE_EXECUTION = """## Execution Complete
@@ -165,6 +270,30 @@ def check_analysis_cache(request: str):
                          badge, PII flag and stakeholder cards in app.py)
         or None on a cache miss (caller should fall back to live Gemini).
     """
+    _r = _norm(request)
+
+    # Scenario 4: RENAME a column. Checked before the drop scenario so the
+    # rename wording wins (it also mentions customer_segment + stripe).
+    if "rename" in _r and "customer_segment" in _r:
+        return {
+            "report": _RENAME_SEGMENT_REPORT,
+            "tool_log": _discovery_log("stripe_main_001") + [
+                {"tool": "summarize_impact",
+                 "args": {"table": "stripe.customers", "column": "customer_segment"}},
+            ],
+        }
+
+    # Scenario 5: DISABLE an entire table. Uses summarize_table_impact so
+    # app.py ranks it with calculate_table_risk and renders the table diff.
+    if ("disable" in _r or "stop_syncing" in _r) and "customers" in _r and "customer_segment" not in _r:
+        return {
+            "report": _DISABLE_CUSTOMERS_REPORT,
+            "tool_log": _discovery_log("stripe_main_001") + [
+                {"tool": "summarize_table_impact",
+                 "args": {"table": "stripe.customers"}},
+            ],
+        }
+
     # Scenario 1: business-critical drop.
     if _mentions(request, "customer_segment", "stripe"):
         return {
@@ -427,9 +556,50 @@ def check_execution_cache(request: str):
     # unless an execution is actually requested.
     from fivetran_tools import (
         modify_connection_column_config,
+        rename_column_config,
+        disable_table_sync,
         sync_connection,
         get_change_log,
     )
+
+    _r = _norm(request)
+
+    # RENAME a column — checked first (also mentions customer_segment).
+    if "rename" in _r and "customer_segment" in _r:
+        rename_column_config(
+            connection_id="stripe_main_001", schema_name="stripe",
+            table_name="customers", column_name="customer_segment",
+            new_column_name="segment_label",
+        )
+        sync_connection("stripe_main_001")
+        return {
+            "result": _RENAME_SEGMENT_EXECUTION,
+            "change_log": get_change_log(),
+            "tool_log": [
+                {"tool": "rename_column_config",
+                 "args": {"connection_id": "stripe_main_001", "schema_name": "stripe",
+                          "table_name": "customers", "column_name": "customer_segment",
+                          "new_column_name": "segment_label"}},
+                {"tool": "sync_connection", "args": {"connection_id": "stripe_main_001"}},
+            ],
+        }
+
+    # DISABLE an entire table.
+    if ("disable" in _r or "stop_syncing" in _r) and "customers" in _r and "customer_segment" not in _r:
+        disable_table_sync(
+            connection_id="stripe_main_001", schema_name="stripe", table_name="customers",
+        )
+        sync_connection("stripe_main_001")
+        return {
+            "result": _DISABLE_CUSTOMERS_EXECUTION,
+            "change_log": get_change_log(),
+            "tool_log": [
+                {"tool": "disable_table_sync",
+                 "args": {"connection_id": "stripe_main_001", "schema_name": "stripe",
+                          "table_name": "customers"}},
+                {"tool": "sync_connection", "args": {"connection_id": "stripe_main_001"}},
+            ],
+        }
 
     target = None
     result_text = None
